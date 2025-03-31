@@ -1,8 +1,35 @@
 
 import cv2
 import mediapipe as mp
-import Controller
+import tkinter as tk
+import pyautogui 
+from pygrabber.dshow_graph import FilterGraph 
 
+def MoveMouseTo(x,y):
+    nowPositionMouse=pyautogui.position()
+    pyautogui.moveTo(nowPositionMouse.x-x,
+                     nowPositionMouse.y-y)
+def ClickMouseLeft():
+    pyautogui.click()
+def DoubleClickMouseLeft():
+    pyautogui.click(clicks=2)
+    
+def ScrollingMouse(x):
+    pyautogui.scroll(x)
+    
+def Press(item):
+    pyautogui.press(item)
+
+def GetAvailableCameras():
+    
+
+    devices = FilterGraph().get_input_devices()
+    cameras = {}
+
+    for index,device in enumerate(devices):
+        cameras[index] = device
+
+    return cameras
 
 def DetectHandInfo(hands,frame):
     myHands=[]
@@ -42,12 +69,36 @@ def CountFingers(hand):
         
     return fingers
         
-capture=cv2.VideoCapture(0)
+
+cameras = GetAvailableCameras()
+
+selected_Camera = 0
+if(len(cameras)!=1 and len(cameras)!=0):
+    select_window = tk.Tk()
+    select_window.geometry("300x200")
+    select_window.title('Select Camera')
+
+    options = tk.StringVar(select_window)
+    options.set(cameras[0])
+
+    om1=tk.OptionMenu(select_window, options, *cameras.values())
+    om1.grid(row=1,column=1,padx=100,pady=10)
+
+    menu=select_window.nametowidget(om1.menuname)   
+
+    select_window.mainloop()
+
+    for index in cameras:
+        if cameras[index]==options.get():
+            selected_Camera=index
+            break
+
+capture=cv2.VideoCapture(selected_Camera)
 drawing = mp.solutions.drawing_utils
 mp_hands=mp.solutions.hands
 
 width=1280
-height=720
+height=960
 capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
 capture.set(cv2.CAP_PROP_FRAME_HEIGHT,height)
 capture.set(cv2.CAP_PROP_FPS, 100)
@@ -108,7 +159,7 @@ with mp_hands.Hands(min_detection_confidence=0.85, min_tracking_confidence=0.5, 
                 #logic for mouse
                 if xp==0 and yp==0:
                     xp,yp=[x1,y1]
-                Controller.MoveMouseTo(xp-x1,yp-y1)
+                MoveMouseTo(xp-x1,yp-y1)
                 xp,yp=[x1,y1]
             if any(rightFingers[i]==1 for i in nonMove) or all(rightFingers[i]==0 for i in range(0,5)):
                 xp,yp=0,0
@@ -116,14 +167,14 @@ with mp_hands.Hands(min_detection_confidence=0.85, min_tracking_confidence=0.5, 
             if all(rightFingers[i]==1 for i in range(0,5)):
                 if xs==0 and ys==0:
                     xs,ys=[0,y5]
-                Controller.ScrollingMouse(y5-ys)
+                ScrollingMouse(y5-ys)
                 xs,ys=[0,y5]
             else:
                 xs,ys=0,0
             #Mouse click-two fingers are up
             nonDoubleClick=[0,3,4]
             if rightFingers[1] and rightFingers[2] and all(rightFingers[i]==0 for i in nonDoubleClick) and not doubleClicked:
-                Controller.ClickMouseLeft()
+                ClickMouseLeft()
                 doubleClicked=True
             
 
@@ -132,7 +183,7 @@ with mp_hands.Hands(min_detection_confidence=0.85, min_tracking_confidence=0.5, 
             #double click
             nonClick=[2,3,4]
             if rightFingers[0] and rightFingers[1] and all(rightFingers[i]==0 for i in nonClick) and not clicked:
-                Controller.DoubleClickMouseLeft()
+                DoubleClickMouseLeft()
                 clicked=True
             if any(rightFingers[i]==1 for i in nonClick) or (rightFingers[0]==0 or rightFingers[1]==0):
                 clicked=False
@@ -143,14 +194,14 @@ with mp_hands.Hands(min_detection_confidence=0.85, min_tracking_confidence=0.5, 
             #ToRight
             nonToRight=[1,2,3,4]
             if leftFingers[0]==1 and all(leftFingers[i]==0 for i in nonToRight) and not clickRight:
-                Controller.Press('right')
+                Press('right')
                 clickRight=True
             if leftFingers[0]==0 or any (leftFingers[i]==1 for i in nonToRight):
                 clickRight=False
             #ToUp
             nonToUp=[0,2,3,4]
             if leftFingers[1]==1 and all(leftFingers[i]==0 for i in nonToUp) and not clickTop:
-                Controller.Press('up')
+                Press('up')
                 clickTop=True
             if (leftFingers[1]==0 and leftFingers[0]==0) or  any (leftFingers[i]==1 for i in nonToUp):
                 clickTop=False
@@ -158,21 +209,21 @@ with mp_hands.Hands(min_detection_confidence=0.85, min_tracking_confidence=0.5, 
             #ToLeft
             nonToLeft=[0,1,2,3]
             if leftFingers[4]==1 and all(leftFingers[i]==0 for i in nonToLeft) and not clickLeft:
-                Controller.Press('left')
+                Press('left')
                 clickLeft=True
             if leftFingers[4]==0 or any (leftFingers[i]==1 for i in nonToLeft):
                 clickLeft=False
             #ToDown
             nonToDown=[1,2,3,4]
             if leftFingers[0]==0 and all(leftFingers[i]==1 for i in nonToDown) and not clickDown:
-                Controller.Press('down')
+                Press('down')
                 clickDown=True
             if leftFingers[0]==1  or any (leftFingers[i]==0 for i in nonToDown):
                 clickDown=False
             
             #screenshot
             if all(leftFingers[i] for i in range(0,5)) and not screenshoted:
-                Controller.Press('prtscr')
+                Press('prtscr')
                 screenshoted=True
             else :
                 screenshoted=False
