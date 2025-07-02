@@ -1,3 +1,5 @@
 
-.venv
+hand_controller_env
 output
+dist
+build
