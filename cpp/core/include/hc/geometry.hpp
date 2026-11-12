@@ -41,11 +41,28 @@ float IoU(const Rect& a, const Rect& b);
 // stays centered on `r.center` and keeps `r.rotation_rad`.
 RotatedRect SquareLong(const RotatedRect& r, float aspect);
 
-// Returns a copy of `r` scaled by (scale_x, scale_y) about its own center,
-// then shifted along its own rotated axes by (shift_x, shift_y), where the
-// shifts are fractions of the (post-scale) rect's own w and h. The rectangle
-// keeps `r.rotation_rad`.
-RotatedRect ExpandAndShift(const RotatedRect& r, float scale_x, float scale_y,
-                            float shift_x, float shift_y);
+// The parameters of a rect transformation, mirroring the options of
+// MediaPipe's RectTransformationCalculator.
+struct RectTransform {
+  float scale_x, scale_y, shift_x, shift_y;
+  bool square_long;
+};
+
+// Returns `r` transformed by `t`, where `aspect` is frame width / frame
+// height (the same convention SquareLong uses).
+//
+// Applies MediaPipe's TransformNormalizedRect order exactly:
+//   1. shift the center along the rect's own rotated axes, by fractions
+//      (shift_x, shift_y) of the rect's *input* w and h -- before any
+//      squaring or scaling;
+//   2. if `square_long`, square the rect on its longer side in pixels;
+//   3. scale w and h by (scale_x, scale_y).
+//
+// The order matters: the shift reads the pre-scale, pre-square dimensions,
+// which is why this is a single function rather than a composition of
+// smaller ones -- squaring overwrites the very w/h the shift must be
+// computed from. `rotation_rad` is carried through unchanged.
+RotatedRect TransformRect(const RotatedRect& r, float aspect,
+                          const RectTransform& t);
 
 }  // namespace hc

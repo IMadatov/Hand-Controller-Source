@@ -61,23 +61,41 @@ RotatedRect SquareLong(const RotatedRect& r, float aspect) {
   return out;
 }
 
-RotatedRect ExpandAndShift(const RotatedRect& r, float scale_x, float scale_y,
-                            float shift_x, float shift_y) {
+RotatedRect TransformRect(const RotatedRect& r, float aspect,
+                          const RectTransform& t) {
   RotatedRect out = r;
-  out.w = r.w * scale_x;
-  out.h = r.h * scale_y;
 
-  // The rect's own rotated axes: x' points along rotation_rad, y' is x'
-  // rotated -90 degrees (matching image coordinates, where y grows downward
-  // and a positive rotation turns x' toward +y').
+  // Step 1: shift the center along the rect's own rotated axes, using the
+  // *input* w/h -- before squaring or scaling, matching MediaPipe's
+  // TransformNormalizedRect. Derived from its pixel-space x_shift/y_shift
+  // by dividing through by image_width / image_height respectively and
+  // substituting aspect = image_width / image_height, which leaves a
+  // 1/aspect on the cross-axis term of dx and an aspect on that of dy.
+  //
+  // At rotation == 0 this degenerates exactly to MediaPipe's fast path
+  // (dx = w * shift_x, dy = h * shift_y), since cos(0) and sin(0) are
+  // exactly 1 and 0.
   const float cos_r = std::cos(r.rotation_rad);
   const float sin_r = std::sin(r.rotation_rad);
 
-  const float dx_local = shift_x * out.w;
-  const float dy_local = shift_y * out.h;
+  const float dx = r.w * t.shift_x * cos_r - (r.h * t.shift_y * sin_r) / aspect;
+  const float dy = aspect * r.w * t.shift_x * sin_r + r.h * t.shift_y * cos_r;
 
-  out.center.x = r.center.x + dx_local * cos_r + dy_local * sin_r;
-  out.center.y = r.center.y + dx_local * sin_r - dy_local * cos_r;
+  out.center.x = r.center.x + dx;
+  out.center.y = r.center.y + dy;
+
+  // Step 2: square on the longer side, still before scaling.
+  float w = r.w;
+  float h = r.h;
+  if (t.square_long) {
+    const RotatedRect squared = SquareLong(r, aspect);
+    w = squared.w;
+    h = squared.h;
+  }
+
+  // Step 3: scale last.
+  out.w = w * t.scale_x;
+  out.h = h * t.scale_y;
 
   return out;
 }
