@@ -1,0 +1,9 @@
+add_library(hc_core STATIC
+  src/geometry.cpp
+)
+
+target_include_directories(hc_core PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+hc_assert_no_forbidden_deps(hc_core)
