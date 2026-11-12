@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <sstream>
 
 namespace hc {
@@ -32,6 +33,9 @@ const char* StageName(Stage s) {
 
 // Computes the p-th percentile of a vector of values. Assumes the vector
 // is sorted. If the percentile index is fractional, linearly interpolates.
+//
+// Convention: linear interpolation between the order statistics at
+// (p/100)*(n-1).
 double Percentile(const std::vector<double>& sorted_samples, double p) {
   if (sorted_samples.empty()) return 0.0;
   if (sorted_samples.size() == 1) return sorted_samples[0];
@@ -89,21 +93,27 @@ StageStats Metrics::Get(Stage s) const {
 
 std::string Metrics::Format() const {
   std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3);
   bool first = true;
 
   for (int i = 0; i < static_cast<int>(Stage::kCount); ++i) {
-    const auto& samples = samples_[i];
-    if (samples.empty()) continue;  // Skip stages with no samples.
+    // Skip only stages that never ran. A stage counted via Bump() with no
+    // recorded durations still gets a row, so the report cannot imply it
+    // never ran.
+    if (calls_[i] == 0) continue;
 
     if (!first) oss << "\n";
     first = false;
 
     const StageStats stats = Get(static_cast<Stage>(i));
-    oss << StageName(static_cast<Stage>(i))
-        << ": calls=" << stats.calls
-        << " mean=" << stats.mean_ms
-        << "ms p50=" << stats.p50_ms
-        << "ms p95=" << stats.p95_ms << "ms";
+    oss << StageName(static_cast<Stage>(i)) << ": calls=" << stats.calls;
+    if (samples_[i].empty()) {
+      // No durations to report: "n/a" rather than a misleading 0.000 ms.
+      oss << " mean=n/a p50=n/a p95=n/a";
+    } else {
+      oss << " mean=" << stats.mean_ms << "ms p50=" << stats.p50_ms
+          << "ms p95=" << stats.p95_ms << "ms";
+    }
   }
 
   return oss.str();

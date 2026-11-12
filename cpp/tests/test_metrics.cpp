@@ -48,11 +48,44 @@ TEST(Metrics, FormatNamesEveryStageWithSamples) {
   // Stages with samples should appear in lowercase
   EXPECT_NE(formatted.find("preprocess"), std::string::npos);
   EXPECT_NE(formatted.find("landmark"), std::string::npos);
-  // Stage with no samples should not appear, or at least not as a misleading 0.00 ms row
+  // PalmDetect was never touched here (calls == 0), so it is omitted.
   EXPECT_EQ(formatted.find("palmdetect"), std::string::npos);
   // Should contain call count information
-  EXPECT_NE(formatted.find("1"), std::string::npos);
-  EXPECT_NE(formatted.find("2"), std::string::npos);
+  EXPECT_NE(formatted.find("calls=1"), std::string::npos);
+  EXPECT_NE(formatted.find("calls=2"), std::string::npos);
+}
+
+TEST(Metrics, FormatShowsBumpOnlyStageWithoutFakeDurations) {
+  Metrics m;
+  m.Bump(Stage::PalmDetect);
+  m.Bump(Stage::PalmDetect);
+
+  const auto formatted = m.Format();
+  // A stage counted without durations must still be reported, with its count.
+  EXPECT_NE(formatted.find("palmdetect"), std::string::npos);
+  EXPECT_NE(formatted.find("calls=2"), std::string::npos);
+  // ...but must not invent a 0.00 ms duration for it.
+  EXPECT_EQ(formatted.find("0.00"), std::string::npos);
+  // A stage that never ran at all stays out of the report entirely.
+  EXPECT_EQ(formatted.find("associate"), std::string::npos);
+}
+
+TEST(Metrics, PercentileConventionForOneAndTwoSamples) {
+  // Pin the interpolation convention exactly: linear interpolation between
+  // order statistics at (p/100)*(n-1). The 100-sample test's +/-1.0
+  // tolerance would hide an off-by-one here.
+  Metrics one;
+  one.Add(Stage::Landmark, 7.0);
+  EXPECT_DOUBLE_EQ(one.Get(Stage::Landmark).p50_ms, 7.0);
+  EXPECT_DOUBLE_EQ(one.Get(Stage::Landmark).p95_ms, 7.0);
+
+  Metrics two;
+  two.Add(Stage::Landmark, 10.0);
+  two.Add(Stage::Landmark, 20.0);
+  // idx = 0.5 -> halfway between the two samples.
+  EXPECT_DOUBLE_EQ(two.Get(Stage::Landmark).p50_ms, 15.0);
+  // idx = 0.95 -> 10.0*(1-0.95) + 20.0*0.95 = 0.5 + 19.0 = 19.5.
+  EXPECT_DOUBLE_EQ(two.Get(Stage::Landmark).p95_ms, 19.5);
 }
 
 TEST(Metrics, ScopedStageRecordsExactlyOneSample) {

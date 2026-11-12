@@ -19,7 +19,12 @@ enum class Stage {
 
 // Statistics for a single stage's samples.
 struct StageStats {
-  std::uint64_t calls;   // Number of samples recorded for this stage.
+  // Total number of Add() + Bump() invocations for this stage. Bump() counts
+  // without recording a duration, so `calls` can exceed the number of
+  // samples the three duration fields below are computed from.
+  std::uint64_t calls;
+  // Computed only over Add()-recorded samples; all three are 0.0 when the
+  // stage has no samples, even if `calls` is non-zero.
   double mean_ms;        // Mean duration across all samples.
   double p50_ms;         // 50th percentile (median).
   double p95_ms;         // 95th percentile.
@@ -40,8 +45,11 @@ class Metrics {
   // and all durations 0.0.
   StageStats Get(Stage s) const;
 
-  // Returns a formatted report of all stages with samples. Stages with no
-  // samples are omitted entirely (not shown as "0.00 ms" rows).
+  // Returns a formatted report, one line per stage that ran. A stage with
+  // calls == 0 is omitted entirely. A stage with calls but no recorded
+  // durations (counted via Bump only) appears with its call count and `n/a`
+  // in place of each duration, so the report never claims a stage never ran
+  // and never shows a misleading 0.00 ms row.
   std::string Format() const;
 
   // Clears all samples and counts for all stages.
@@ -64,12 +72,8 @@ class ScopedStage {
  private:
   Metrics& metrics_;
   Stage stage_;
-  // We avoid std::chrono here: the brief says "test infrastructure must not
-  // need a real timer to be deterministic," so we accept a duration parameter
-  // to Add() instead of capturing wall time internally. The dtor will compute
-  // elapsed time if we can, but tests will mock it via direct Add() calls.
-  // For now, capture the start time; the implementation will measure elapsed
-  // time in the dtor.
+  // Construction timestamp from std::chrono::high_resolution_clock; the dtor
+  // records the elapsed time since it via Add().
   double start_time_ms_;
 };
 
