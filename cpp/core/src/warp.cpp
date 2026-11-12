@@ -6,14 +6,28 @@ namespace hc {
 
 namespace {
 
-// Samples one channel of `src` bilinearly at pixel coordinates (px, py),
+// The four texel addresses and the bilinear weights for one sample position.
+// Computed once per output pixel and reused for all three channels: the tap
+// geometry depends only on (px, py), not on the channel, so recomputing it
+// per channel would triple the floor/weight work in the hottest loop.
+//
+// A null pointer marks a texel outside [0, width) x [0, height). Such a
+// texel contributes the value 0 to the blend (MediaPipe's BORDER_ZERO) while
+// its in-range neighbours still contribute normally -- the zeroing is
+// per-sample, never per output pixel.
+struct BilinearTaps {
+  const std::uint8_t* p00;
+  const std::uint8_t* p10;
+  const std::uint8_t* p01;
+  const std::uint8_t* p11;
+  float wx0, wx1, wy0, wy1;
+};
+
+// Computes the tap addresses and weights for pixel coordinates (px, py),
 // where (0,0) is the top-left corner of pixel (0,0) and pixel centers sit at
 // half-integer coordinates (matching the convention used to build the crop
-// coordinates below). Texels outside [0, width) x [0, height) contribute a
-// value of zero (MediaPipe's BORDER_ZERO), applied per contributing sample
-// rather than to the whole output pixel.
-float SampleChannelZeroBorder(const ImageView& src, int channel, float px,
-                               float py) {
+// coordinates below).
+BilinearTaps ComputeTaps(const ImageView& src, float px, float py) {
   // Texel (ix, iy) covers [ix, ix+1) x [iy, iy+1), so its center is at
   // (ix+0.5, iy+0.5). Convert from pixel coordinates to texel-center-relative
   // coordinates before taking floor, so that bilinear weights come out
@@ -26,27 +40,41 @@ float SampleChannelZeroBorder(const ImageView& src, int channel, float px,
   const int x1 = x0 + 1;
   const int y1 = y0 + 1;
 
-  const float wx1 = fx - static_cast<float>(x0);
-  const float wy1 = fy - static_cast<float>(y0);
-  const float wx0 = 1.0f - wx1;
-  const float wy0 = 1.0f - wy1;
+  BilinearTaps t;
+  t.wx1 = fx - static_cast<float>(x0);
+  t.wy1 = fy - static_cast<float>(y0);
+  t.wx0 = 1.0f - t.wx1;
+  t.wy0 = 1.0f - t.wy1;
 
-  auto Texel = [&](int ix, int iy) -> float {
+  // Address of texel (ix, iy)'s first channel byte, or nullptr if the texel
+  // lies outside the source. Row addressing always goes through `stride`,
+  // which may exceed width * 3.
+  auto Addr = [&](int ix, int iy) -> const std::uint8_t* {
     if (ix < 0 || ix >= src.width || iy < 0 || iy >= src.height) {
-      return 0.0f;
+      return nullptr;
     }
-    const std::uint8_t* row = src.data + static_cast<std::size_t>(iy) * src.stride;
-    return static_cast<float>(row[ix * 3 + channel]);
+    return src.data + static_cast<std::size_t>(iy) * src.stride + ix * 3;
   };
 
-  const float v00 = Texel(x0, y0);
-  const float v10 = Texel(x1, y0);
-  const float v01 = Texel(x0, y1);
-  const float v11 = Texel(x1, y1);
+  t.p00 = Addr(x0, y0);
+  t.p10 = Addr(x1, y0);
+  t.p01 = Addr(x0, y1);
+  t.p11 = Addr(x1, y1);
+  return t;
+}
 
-  const float top = v00 * wx0 + v10 * wx1;
-  const float bottom = v01 * wx0 + v11 * wx1;
-  return top * wy0 + bottom * wy1;
+// Blends one channel through the precomputed taps. The arithmetic order is
+// identical to computing the taps inline, so results are bit-for-bit the
+// same as the per-channel formulation.
+inline float BlendChannel(const BilinearTaps& t, int channel) {
+  const float v00 = t.p00 ? static_cast<float>(t.p00[channel]) : 0.0f;
+  const float v10 = t.p10 ? static_cast<float>(t.p10[channel]) : 0.0f;
+  const float v01 = t.p01 ? static_cast<float>(t.p01[channel]) : 0.0f;
+  const float v11 = t.p11 ? static_cast<float>(t.p11[channel]) : 0.0f;
+
+  const float top = v00 * t.wx0 + v10 * t.wx1;
+  const float bottom = v01 * t.wx0 + v11 * t.wx1;
+  return top * t.wy0 + bottom * t.wy1;
 }
 
 }  // namespace
@@ -96,9 +124,14 @@ void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
       const float src_px = cx_px + rx;
       const float src_py = cy_px + ry;
 
-      const float r = SampleChannelZeroBorder(src, src_r, src_px, src_py);
-      const float g = SampleChannelZeroBorder(src, src_g, src_px, src_py);
-      const float b = SampleChannelZeroBorder(src, src_b, src_px, src_py);
+      // Tap positions and weights depend only on the sample position, so
+      // compute them once and fetch all three channels from the same four
+      // texel addresses.
+      const BilinearTaps taps = ComputeTaps(src, src_px, src_py);
+
+      const float r = BlendChannel(taps, src_r);
+      const float g = BlendChannel(taps, src_g);
+      const float b = BlendChannel(taps, src_b);
 
       const int idx = oy * side + ox;
       dst[plane_for_r * plane_size + idx] = r * o.scale + o.bias;
