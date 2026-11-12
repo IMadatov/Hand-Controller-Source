@@ -1,5 +1,6 @@
 add_library(hc_core STATIC
   src/geometry.cpp
+  src/metrics.cpp
 )
 
 target_include_directories(hc_core PUBLIC
