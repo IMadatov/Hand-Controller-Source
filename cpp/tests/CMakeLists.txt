@@ -25,3 +25,4 @@ endfunction()
 
 hc_add_test(test_geometry test_geometry.cpp LIBS hc_core)
 hc_add_test(test_metrics test_metrics.cpp LIBS hc_core)
+hc_add_test(test_warp test_warp.cpp LIBS hc_core)
