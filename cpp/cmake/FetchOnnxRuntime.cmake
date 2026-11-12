@@ -14,9 +14,11 @@ set(HC_ONNXRUNTIME_VERSION "1.18.1")
 if(WIN32)
   set(_hc_ort_archive "onnxruntime-win-x64-${HC_ONNXRUNTIME_VERSION}.zip")
   set(_hc_ort_url "https://github.com/microsoft/onnxruntime/releases/download/v${HC_ONNXRUNTIME_VERSION}/${_hc_ort_archive}")
-  # SHA256 of onnxruntime-win-x64-1.18.1.zip, computed by hand from the
-  # official GitHub release asset (see cpp/docs/models.md for how/when).
-  set(_hc_ort_sha256 "07d64003c5ee714cadc0c433cdbed3a8462af8c0dc9340357daafec791ab9512")
+  # SHA256 of onnxruntime-win-x64-1.18.1.zip (60,979,938 bytes), computed by
+  # streaming the official GitHub release asset twice, in two independent
+  # downloads that agreed, and confirming the result is a valid zip containing
+  # lib/onnxruntime.dll and lib/onnxruntime.lib. See cpp/docs/models.md.
+  set(_hc_ort_sha256 "53fb7226fe3cf16001afd1eae79e35f891a20e80bd686185d62ea878e6f9b1a6")
 else()
   set(_hc_ort_archive "onnxruntime-linux-x64-${HC_ONNXRUNTIME_VERSION}.tgz")
   set(_hc_ort_url "https://github.com/microsoft/onnxruntime/releases/download/v${HC_ONNXRUNTIME_VERSION}/${_hc_ort_archive}")

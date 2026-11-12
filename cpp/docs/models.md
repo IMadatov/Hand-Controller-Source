@@ -45,17 +45,41 @@ CC BY-SA 4.0, source: Wikimedia Commons, see "Fixture image" below).
 - **Version pinned:** 1.18.1 — chosen because it is a recent stable tagged
   release with published Linux x64 and Windows x64 archives.
 - **Linux archive:** `onnxruntime-linux-x64-1.18.1.tgz`
-  SHA256 (OBSERVED, computed locally after downloading the official GitHub
-  release asset):
-  `a0994512ec1e1debc00c18bfc7a5f16249f6ebd6a6128ff2034464cc380ea21`
-- **Windows archive:** `onnxruntime-win-x64-1.18.1.zip`
-  SHA256 (OBSERVED, computed locally after downloading the official GitHub
-  release asset; **NOT runtime-tested** — this sandbox is Linux-only, so the
-  Windows archive was hash-verified but never linked/run):
-  `07d64003c5ee714cadc0c433cdbed3a8462af8c0dc9340357daafec791ab9512`
+  SHA256 (OBSERVED, re-computed from the archive actually present in the build
+  tree at `build/_deps/onnxruntime_release-subbuild/.../src/`, i.e. the bytes
+  CMake really downloaded and hash-checked):
+  `a0994512ec1e1debc00c18bfc7a5f16249f6ebd6a6128ff2034464cc380ea211`
+- **Windows archive:** `onnxruntime-win-x64-1.18.1.zip`, 60,979,938 bytes
+  SHA256 (OBSERVED, see correction note below):
+  `53fb7226fe3cf16001afd1eae79e35f891a20e80bd686185d62ea878e6f9b1a6`
+  **NOT runtime-tested** — this sandbox is Linux-only, so the Windows archive
+  was hash-verified and its contents listed, but never linked or run. Structural
+  check only: the zip contains `onnxruntime-win-x64-1.18.1/lib/onnxruntime.dll`
+  and `.../lib/onnxruntime.lib`, which is what `FetchOnnxRuntime.cmake` expects
+  at `${SOURCE_DIR}/lib/` after FetchContent strips the top-level directory.
 - Both archives were downloaded directly from
   `https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/...`
   (the official release, not a mirror).
+
+**Correction note (both ONNX Runtime hashes were wrong in the first revision).**
+The first revision of this document recorded the Linux hash with only 63 hex
+digits (a truncated transcription) and recorded the Windows hash as
+`07d64003...ab9512`, which is simply not the hash of that asset. Both have been
+re-derived from bytes and replaced:
+
+- Linux: re-hashed from the archive in the build tree — the exact bytes CMake
+  downloaded and accepted against `URL_HASH`. 64 digits, ends `...380ea211`.
+- Windows: re-downloaded twice, independently, streaming to a SHA256 accumulator;
+  both passes agreed on `53fb7226...f9b1a6`, and the payload was confirmed to be
+  a real 28-entry zip holding `onnxruntime.dll`/`onnxruntime.lib`.
+
+The Windows error was **not** cosmetic and not confined to this document: the
+same wrong value was in `cmake/FetchOnnxRuntime.cmake`, so **every Windows
+configure would have failed** the `URL_HASH` check. This invalidates the first
+revision's reasoning that "CMake's `URL_HASH` is authoritative so a typo in
+`models.md` is harmless" — the `.cmake` file was wrong too. Every hash in this
+document has now been re-counted for length and re-checked against either real
+local bytes or two agreeing downloads.
 
 ## Palm detection model
 
@@ -74,10 +98,15 @@ File: `palm_detection_mediapipe_2023feb.onnx`
   same preprocessing code.
 - **Resize/letterbox:** MediaPipe's graph uses `keep_aspect_ratio: true` with
   `BORDER_ZERO` padding (i.e. letterbox, not plain stretch) — OBSERVED from
-  `palm_detection_cpu.pbtxt`. `validate_models.cpp`'s own preprocessing does a
-  plain aspect-preserving resize for the palm path and does NOT implement
-  MediaPipe's exact letterbox border semantics; that exact resampler is
-  Task 4's job, not this task's.
+  `palm_detection_cpu.pbtxt`.
+  `validate_models.cpp`'s `LetterboxToNhwc()` reproduces that shape: it scales
+  the 640x480 fixture by a single factor `min(192/640, 192/480)`, centres the
+  result, and zero-fills the remaining border, so the aspect ratio IS preserved.
+  It uses nearest-neighbour sampling, whereas MediaPipe interpolates, and it
+  does not reproduce MediaPipe's exact border/rounding semantics — the
+  production-grade resampler is Task 4's job. For Task 4's reference, the
+  letterbox for this fixture is scale `0.3`, content `192x144`, with 24 rows of
+  zero padding top and bottom and no horizontal padding.
 
 ### Output tensors — OBSERVED from `validate_models` output, cross-checked by
 hand-parsing the ONNX file's `GraphProto.output` field order (field 12) with a
@@ -117,13 +146,45 @@ aspect_ratios: 1.0
 fixed_anchor_size: true
 ```
 
-- **Resulting anchor count: 2016** — OBSERVED twice: (a) directly as the
+**Plus one parameter that is NOT in the pbtxt but is load-bearing:**
+
+```
+interpolated_scale_aspect_ratio: 1.0   # proto2 default, NOT written in the pbtxt
+```
+
+- OBSERVED from `mediapipe/calculators/tflite/ssd_anchors_calculator.proto`:
+  `optional float interpolated_scale_aspect_ratio = 13 [default = 1.0];`
+  Because the pbtxt omits the field, the default applies — and the default is
+  what makes the count come out right. Task 5 must set it explicitly to 1.0
+  rather than leaving a zero-initialised struct member.
+- **Resulting anchor count: 2016** — OBSERVED three ways: (a) directly as the
   middle dimension of both ONNX output tensors reported by
   `validate_models` (`[1, 2016, 18]`, `[1, 2016, 1]`); (b) as the literal
   `num_boxes: 2016` field in the same pbtxt's
-  `TensorsToDetectionsCalculatorOptions`. Both sources agree, so this value
-  needs no further confirmation in Task 5 beyond reproducing the anchor
-  *generation* logic that yields 2016 for these parameters.
+  `TensorsToDetectionsCalculatorOptions`; (c) by reimplementing MediaPipe's
+  `SsdAnchorsCalculator::GenerateAnchors` (including `CalculateScale`, the
+  same-stride inner coalescing loop, and the `interpolated_scale_aspect_ratio`
+  branch) and running it on exactly the parameters above.
+
+  The arithmetic, for Task 5 to check itself against:
+
+  | Stride | Feature map | Anchors per cell | Subtotal |
+  |---|---|---|---|
+  | 8 | 192/8 = 24 x 24 = 576 | 2 | 1152 |
+  | 16, 16, 16 (coalesced) | 192/16 = 12 x 12 = 144 | 6 | 864 |
+  | | | **Total** | **2016** |
+
+  Two anchors per cell at stride 8 because `aspect_ratios: 1.0` contributes one
+  and `interpolated_scale_aspect_ratio: 1.0` contributes a second; the three
+  consecutive `strides: 16` layers are merged by the calculator's inner
+  `while (last_same_stride_layer < strides.size() && strides[...] == stride)`
+  loop into a single 12x12 map with 3 x 2 = 6 anchors per cell.
+
+  **Sensitivity check (why this parameter matters):** with
+  `interpolated_scale_aspect_ratio` left at 0.0 the same code yields
+  576 + 432 = **1008** anchors, which contradicts the model's actual output
+  shape. So the first revision's parameter list was genuinely insufficient to
+  reproduce 2016 — recording it was necessary, not pedantic.
 - `num_coords: 18`, `box_coord_offset: 0`, `keypoint_coord_offset: 4`,
   `num_keypoints: 7`, `num_values_per_keypoint: 2`, `reverse_output_order: true`
   — all OBSERVED verbatim from the same pbtxt node
@@ -145,12 +206,37 @@ fixed_anchor_size: true
 ### Live run against the fixture — OBSERVED, `validate_models` output
 
 - num_anchors confirmed = 2016
-- Best raw score = `1.414808`; sigmoid(score) = `0.804523` at anchor index
-  1683. 0.80 clears the 0.5 `min_score_thresh` comfortably and is not noise —
-  this is a real detection, on a fixture with two crossed, clearly-visible
+- Best raw score = `2.275857`; sigmoid(score) = `0.906858` at anchor index
+  **1682**. 0.91 clears the 0.5 `min_score_thresh` comfortably and is not noise
+  — this is a real detection, on a fixture with two crossed, clearly-visible
   palms.
 - Raw box row at that index (18 raw values, pre-decode, anchor-relative):
-  `[4.7002, 5.6171, 92.7093, 92.7408, -2.2925, 50.9371, -8.6756, -38.5467, 11.1860, -29.8626, 27.7332, -17.5594, 42.9212, -2.5921, -21.7281, 22.7313, -34.4161, -11.6298]`
+  `[6.2701, -1.5299, 79.9564, 79.9760, -16.0717, 37.5384, 3.1172, -42.6803, 17.2026, -32.1031, 30.3280, -18.2734, 41.8974, -3.0467, -23.5989, 17.4689, -28.9847, -15.1278]`
+
+  These numbers changed from the first revision (`1.414808` / `0.804523` /
+  index 1683) because the tool's palm preprocessing was switched from a
+  stretch to a true letterbox. The score **improved**, 0.805 -> 0.907, which is
+  the expected direction: the model was trained on aspect-preserved input, so
+  removing the 4:3 -> 1:1 distortion makes the hand easier to detect. Treat the
+  current values as the authoritative ones.
+
+- **The score threshold is a real gate, not decoration** — OBSERVED by running
+  the tool on deliberately hand-free input:
+
+  | Fixture | sigmoid(best score) | Tool exit |
+  |---|---|---|
+  | real hand (committed fixture) | 0.906858 | 0 (pass) |
+  | all-black 640x480 | 0.025053 | 1 (FATAL, below 0.5) |
+  | uniform mid-grey 640x480 | 0.056953 | 1 (FATAL, below 0.5) |
+
+  A ~16x separation between hand and no-hand means the check discriminates;
+  it is not a tautology that passes on anything. (Those negative fixtures were
+  temporary and are not committed; the committed fixture was restored and
+  re-verified byte-identical by SHA256 afterwards.)
+  Incidentally this also settles the pre/post-sigmoid question for this tensor
+  empirically: raw scores of `-3.661387` and `-2.806886` are **negative**, so
+  `Identity_1` carries pre-sigmoid logits, consistent with
+  `sigmoid_score: true` in the pbtxt.
 
 ## Hand landmark model
 
@@ -199,25 +285,44 @@ that order; (b) opencv_zoo's `mp_handpose.py`, which unpacks
 which is the same order confirmed by the protobuf field walk
 (`Identity, Identity_1, Identity_2, Identity_3`).
 
-**Caveat (NOT DETERMINED):** whether `Identity_1` / `Identity_2` are raw
-logits needing a sigmoid or already-squashed probabilities was not
-conclusively settled from the sources read. MediaPipe's pbtxt pipes
-`hand_flag_tensor` through a bare `TensorsToFloatsCalculator` (no sigmoid
-option visible in that node) before thresholding at `0.5` — suggesting the
-TFLite model's own output head already applies sigmoid internally. Consistent
-with that, the live run below produced values already inside `[0, 1]`
-(0.744 and 0.935), which would be a very unlikely coincidence for a raw
-logit. Treat these as presence/handedness probabilities already in `[0, 1]`
-unless Task 7/8's end-to-end test shows otherwise.
+**Activation — OBSERVED (this was NOT DETERMINED in the first revision; now
+settled from source).** `Identity_1` / `Identity_2` are **already
+probabilities** — the model's own head applies the sigmoid, and the consumer
+must NOT apply another one. Chain of evidence:
+
+1. `hand_landmark_cpu.pbtxt` pipes `hand_flag_tensor` into a
+   `TensorsToFloatsCalculator` node that carries **no options block at all**.
+2. `tensors_to_floats_calculator.proto` declares
+   `optional Activation activation = 1 [default = NONE];` with
+   `enum Activation { NONE = 0; SIGMOID = 1; }`. With no options, activation is
+   `NONE` — MediaPipe applies no sigmoid outside the model.
+3. The immediately following node thresholds that float at `0.5`. A `0.5`
+   cutoff is only meaningful against a value already in `[0, 1]`.
+4. Handedness goes to `TensorsToClassificationCalculator` with
+   `binary_classification: true`, which likewise interprets its input as a
+   probability.
+5. Consistent with the live run: `0.744082` and `0.934898`, both inside
+   `[0, 1]`.
+
+Contrast with the palm detector, whose `Identity_1` *is* a raw logit
+(`sigmoid_score: true`, and observed negative values on hand-free input).
+Applying a sigmoid twice here would be a silent accuracy bug, so this
+distinction between the two models matters.
 
 ### Thresholds — OBSERVED verbatim from `hand_landmark_cpu.pbtxt`
 
 - **Presence threshold** (`ThresholdingCalculatorOptions.threshold`): `0.5`.
-- Handedness threshold: NOT DETERMINED — no equivalent `ThresholdingCalculator`
-  for handedness was found in `hand_landmark_cpu.pbtxt`; the Python solutions
-  wrapper may apply its own cutoff (`> 0.5` = one label, `<= 0.5` = the other)
-  but that was not located in a file this task fetched directly, so it is not
-  recorded as observed. Task 9 (`Handedness`) should confirm.
+- Handedness threshold: there is no `ThresholdingCalculator` for handedness in
+  `hand_landmark_cpu.pbtxt`. Instead `TensorsToClassificationCalculator` with
+  `binary_classification: true` and `top_k: 1` turns the single score into one
+  labelled class, which is an implicit `0.5` split between the two labels.
+- **Handedness label order: NOT DETERMINED.** Which side of that split means
+  "Left" and which means "Right" is set by
+  `label_map_path: "mediapipe/modules/hand_landmark/handedness.txt"`, a file
+  this task did not fetch. Task 9/10 must read that label map rather than
+  guessing; also note MediaPipe's own docs warn handedness assumes a
+  mirrored (selfie-view) input image, so the convention flips with input
+  mirroring. Recorded as a gap, not an assumption.
 
 ### Live run against the fixture — OBSERVED, `validate_models` output
 
@@ -266,12 +371,18 @@ OBSERVED verbatim from
 - **Target angle:** `rotation_vector_target_angle_degrees: 90`.
 - `scale_x: 2.6`
 - `scale_y: 2.6`
-- `shift_x`: NOT PRESENT in the pbtxt node → defaults to the
-  `RectTransformationCalculatorOptions` proto default. The proto default was
-  NOT DETERMINED in this task (the `.proto` file defining that default was
-  not fetched); treat `shift_x` as `0.0` only provisionally. Task 7 must
-  confirm this against the calculator's `.proto` default or the end-to-end
-  test before relying on it.
+- `shift_x: 0.0` — OBSERVED (upgraded from NOT DETERMINED in the first
+  revision). The field is absent from the pbtxt node, so the proto2 default
+  applies, and `mediapipe/calculators/util/rect_transformation_calculator.proto`
+  declares it verbatim as:
+  ```
+  optional float shift_x = 5;
+  ```
+  with **no** `[default = ...]` clause. For a proto2 `optional float` with no
+  explicit default the implicit default is `0.0`, so `shift_x` is `0.0` — this
+  is now a determined value, not a provisional one. (Contrast `scale_x`/`scale_y`
+  in the same file, which *do* carry `[default = 1.0]`, confirming the file does
+  spell out defaults when they are non-zero.)
 - `shift_y: -0.5`
 - `square_long: true`
 
@@ -282,25 +393,106 @@ OBSERVED verbatim from
 `mediapipe/modules/hand_landmark/calculators/hand_landmarks_to_rect_calculator.cc`
 (`google-ai-edge/mediapipe`, master, fetched directly):
 
-- **Rotation axis is NOT a simple two-keypoint pair.** The rotation angle is
-  computed from (a) the wrist (full 21-point landmark index **0**), and (b)
-  the average position of three PIP-row joints: full-landmark indices
-  **5, 9, 13** (index, middle, and ring finger MCP/PIP row — the calculator's
-  own internal names are `kIndexFingerPIPJoint`, `kMiddleFingerPIPJoint`,
-  `kRingFingerPIPJoint`, derived from a 12-point partial-landmark subset
-  `{0,1,2,3,5,6,9,10,13,14,17,18}` of the full 21; mapped back to full-landmark
-  indices by hand in this task: partial index 0 → full 0, partial index 4 →
-  full 5, partial index 6 → full 9, partial index 8 → full 13). Target angle
-  is `M_PI * 0.5` (90 degrees), same convention as the palm case. This is
-  recorded exactly as found rather than forced into the brief's "two
-  keypoint indices" phrasing, because the real calculator averages three
-  points on one side of the axis, not one.
+- **Rotation axis is NOT a simple two-keypoint pair, and the three far-side
+  points are NOT equally weighted.** The axis runs from the wrist to a
+  *nested* average of three points. Verbatim from `ComputeRotation`:
+
+  ```cpp
+  const float x0 = landmarks.landmark(kWristJoint).x() * image_size.first;
+  const float y0 = landmarks.landmark(kWristJoint).y() * image_size.second;
+
+  float x1 = (landmarks.landmark(kIndexFingerPIPJoint).x() +
+              landmarks.landmark(kRingFingerPIPJoint).x()) /
+             2.f;
+  float y1 = (landmarks.landmark(kIndexFingerPIPJoint).y() +
+              landmarks.landmark(kRingFingerPIPJoint).y()) /
+             2.f;
+  x1 = (x1 + landmarks.landmark(kMiddleFingerPIPJoint).x()) / 2.f *
+       image_size.first;
+  y1 = (y1 + landmarks.landmark(kMiddleFingerPIPJoint).y()) / 2.f *
+       image_size.second;
+
+  const float rotation =
+      NormalizeRadians(kTargetAngle - std::atan2(-(y1 - y0), x1 - x0));
+  ```
+
+  Averaging index+ring first, then averaging *that* with middle, gives
+  **0.25 / 0.5 / 0.25**, not a flat one-third each. The first revision of this
+  document wrongly described it as "the average of three"; that is corrected
+  here.
+
+- **Index mapping — the constants are partial-subset indices and must be
+  remapped.** The calculator's constants are declared under an explicit comment:
+
+  ```cpp
+  // Indices within the partial landmarks.
+  constexpr int kWristJoint = 0;
+  constexpr int kMiddleFingerPIPJoint = 6;
+  constexpr int kIndexFingerPIPJoint = 4;
+  constexpr int kRingFingerPIPJoint = 8;
+  constexpr int kNumLandmarks = 21;
+  constexpr float kTargetAngle = M_PI * 0.5f;
+  ```
+
+  `Process()` does not pass the raw 21-point list through — it unconditionally
+  calls `GetPartialLandmarks(cc)`, which, when it receives the full 21
+  landmarks (exactly what this model emits), rebuilds a 12-point list:
+
+  ```cpp
+  if (landmarks.landmark_size() == kNumLandmarks) {
+    static constexpr int kPartialLandmarkIndices[]{0, 1,  2,  3,  5,  6,
+                                                   9, 10, 13, 14, 17, 18};
+    NormalizedLandmarkList partial_landmarks;
+    for (int i : kPartialLandmarkIndices) {
+      *partial_landmarks.add_landmark() = landmarks.landmark(i);
+    }
+    return partial_landmarks;
+  }
+  ```
+
+  So the subset path is the **live** path, not dead legacy code; the `else`
+  branch is the legacy one, taken only if a caller feeds 12 points directly.
+  Remapping subset position -> full landmark index:
+
+  | Constant | Subset index | **Full landmark index** | Anatomy |
+  |---|---|---|---|
+  | `kWristJoint` | 0 | **0** | wrist |
+  | `kIndexFingerPIPJoint` | 4 | **5** | index finger MCP |
+  | `kMiddleFingerPIPJoint` | 6 | **9** | middle finger MCP |
+  | `kRingFingerPIPJoint` | 8 | **13** | ring finger MCP |
+
+  **In full-landmark terms:** axis from `L[0]` to
+  `0.25*L[5] + 0.5*L[9] + 0.25*L[13]`; target angle `kTargetAngle = M_PI * 0.5`.
+
+  Cross-check that this remapping is the right reading: full indices 5/9/13 are
+  the index/middle/ring **MCP** joints, which matches the calculator's own
+  description of using the index, middle and ring fingers. Reading the constants
+  as full-landmark indices instead would give 4/6/8 = thumb **tip**, index PIP,
+  index **tip** — two points on the index finger plus the thumb, which does not
+  match the stated intent and would put the "far" end of the palm axis out at
+  the fingertips. The `PIPJoint` names are a known misnomer for what are
+  actually MCP joints (MediaPipe issue #1787); the names are wrong, the
+  remapped positions are right.
+
+- **Bounding box uses only those 12 points, not all 21** — easily missed.
+  `NormalizedLandmarkListToRect` receives the *partial* list, and its min/max
+  loops run `for (int i = 0; i < landmarks.landmark_size(); ++i)`, i.e. over 12
+  landmarks. Fingertips (4, 8, 12, 16, 20) are therefore excluded from the ROI
+  extent before `scale_x`/`scale_y` are applied. Task 7 must crop to the subset
+  before computing the box, or the ROI will come out too large.
+
 - `scale_x: 2.0`
 - `scale_y: 2.0`
-- `shift_x`: NOT PRESENT in the pbtxt node → same caveat as above, NOT
-  DETERMINED, provisionally `0.0`.
+- `shift_x: 0.0` — OBSERVED, same proto2 reasoning as the palm case above
+  (`optional float shift_x = 5;`, no explicit default).
 - `shift_y: -0.1`
 - `square_long: true`
+
+**Note for Task 7's `LandmarkRoiOptions`.** Per the controller's ruling this
+splits into one origin index plus weighted rotation targets. The values to fill
+in are: origin index `0`, and
+`rotation_target_weights = {{5, 0.25f}, {9, 0.5f}, {13, 0.25f}}`
+(weights sum to 1.0), target angle `M_PI * 0.5`.
 
 ## Fixture image
 
@@ -318,7 +510,8 @@ OBSERVED verbatim from
   single isolated hand, since that was the clearest permissively-licensed
   photo found; the brief allows "any permissively-licensed hand photograph").
 - **Confirmed to produce a real detection:** palm detector's best score on
-  this fixture was sigmoid 0.805 (see above), well above the 0.5 threshold.
+  this fixture was sigmoid 0.907 (see above), well above the 0.5 threshold,
+  and drops to 0.025 on an all-black frame of the same size.
 
 ## What was NOT verified (explicit gaps)
 
@@ -330,21 +523,40 @@ OBSERVED verbatim from
    `hand_landmark_full.tflite` rests entirely on the opencv_zoo project's own
    documentation and is not independently cross-checked bit-for-bit against
    the original TFLite graphs in this task.
-2. **`shift_x` default for `RectTransformationCalculatorOptions`** — see
-   above, not located in a fetched `.proto` file.
-3. **Handedness threshold / sign convention** — not located in a fetched
-   MediaPipe file; Python solutions-layer behavior was not independently
-   confirmed.
-4. **Whether presence/handedness outputs are pre- or post-sigmoid** — inferred
-   from observed value ranges, not confirmed from a source that states it
-   explicitly.
+2. ~~**`shift_x` default**~~ — **RESOLVED** in this revision. Fetched
+   `rect_transformation_calculator.proto`; `optional float shift_x = 5;` has no
+   explicit default, so proto2's implicit `0.0` applies. No longer a gap.
+3. **Handedness sign convention** (which way round "left" vs "right" maps) —
+   still NOT DETERMINED. `handedness.txt`, the label-map file named by
+   `TensorsToClassificationCalculatorOptions.label_map_path`, was not fetched,
+   so which label index corresponds to which hand is unconfirmed. The
+   *threshold* is determined (`0.5`, see item 4). Task 10 must resolve the
+   label order before trusting handedness, and note the Python
+   `solutions`-layer additionally flips handedness for mirrored input.
+4. ~~**Whether presence/handedness are pre- or post-sigmoid**~~ — **RESOLVED**
+   in this revision, for both models, from source rather than from value ranges:
+   - *Landmark model = **post**-sigmoid (already probabilities).* The graph
+     feeds `hand_flag_tensor` into a bare `TensorsToFloatsCalculator` with **no
+     options block**, and `tensors_to_floats_calculator.proto` declares
+     `optional Activation activation = 1 [default = NONE];` — so MediaPipe
+     applies no activation outside the model. The very next node applies
+     `threshold: 0.5` directly to that value, which is only meaningful if the
+     value is already in `[0, 1]`. Handedness likewise goes to
+     `TensorsToClassificationCalculator` with `binary_classification: true`,
+     which consumes a probability directly. Consistent with the observed
+     `presence = 0.744082`, `handedness = 0.934898`.
+   - *Palm model = **pre**-sigmoid (logits).* `sigmoid_score: true` in the
+     pbtxt, and empirically confirmed by negative values (`-3.661387` on a
+     black frame) which a post-sigmoid output could not produce.
 5. **Windows ONNX Runtime archive** was hash-pinned but never actually linked
    or executed (this sandbox has no Windows target); only the Linux path was
-   build- and run-verified.
+   build- and run-verified. Its hash was corrected in this revision (see the
+   ONNX Runtime correction note) and its internal layout checked, but a real
+   Windows build remains unverified.
 
 None of the above gaps are "models are unusable" findings — the hard gate in
 Step 8 of the brief does not apply. Both sessions created without throwing,
-every tensor shape printed, the palm detector's best score (sigmoid 0.805) is
+every tensor shape printed, the palm detector's best score (sigmoid 0.907) is
 a real detection rather than noise, and the 21 printed landmarks are neither
 all identical nor all zero. The gaps above are either forwarded explicitly to
 the later task responsible for confirming them (as the brief's Step 7

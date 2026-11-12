@@ -21,7 +21,7 @@ FetchContent_Declare(
   URL_HASH SHA256=78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c
   DOWNLOAD_NO_EXTRACT TRUE
 )
-FetchContent_Populate(hc_palm_model)
+FetchContent_MakeAvailable(hc_palm_model)
 
 FetchContent_Declare(
   hc_landmark_model
@@ -29,7 +29,11 @@ FetchContent_Declare(
   URL_HASH SHA256=db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c
   DOWNLOAD_NO_EXTRACT TRUE
 )
-FetchContent_Populate(hc_landmark_model)
+FetchContent_MakeAvailable(hc_landmark_model)
 
-set(HC_PALM_MODEL "${hc_palm_model_SOURCE_DIR}/palm_detection_mediapipe_2023feb.onnx" CACHE FILEPATH "Absolute path to the palm-detection ONNX model")
-set(HC_LANDMARK_MODEL "${hc_landmark_model_SOURCE_DIR}/handpose_estimation_mediapipe_2023feb.onnx" CACHE FILEPATH "Absolute path to the hand-landmark ONNX model")
+# Derived paths, not user knobs: CACHE INTERNAL ... FORCE so a stale cache
+# entry from an earlier configure can never beat the freshly-populated path.
+set(HC_PALM_MODEL "${hc_palm_model_SOURCE_DIR}/palm_detection_mediapipe_2023feb.onnx"
+    CACHE INTERNAL "Absolute path to the palm-detection ONNX model" FORCE)
+set(HC_LANDMARK_MODEL "${hc_landmark_model_SOURCE_DIR}/handpose_estimation_mediapipe_2023feb.onnx"
+    CACHE INTERNAL "Absolute path to the hand-landmark ONNX model" FORCE)

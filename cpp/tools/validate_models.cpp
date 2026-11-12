@@ -1,17 +1,22 @@
 // Standalone diagnostic tool for Task 1: loads the palm-detection and
 // hand-landmark ONNX models, prints every input/output tensor's name,
 // shape and element type, then runs both models on the committed fixture
-// image and prints the raw outputs so a human can confirm the models are
-// usable before any later task depends on their shapes.
+// image and prints the raw outputs.
+//
+// This is a hard gate, so it ASSERTS rather than merely printing: any
+// condition that would mean "the models are unusable" (missing/renamed
+// output tensor, palm score below MediaPipe's own threshold, degenerate
+// landmarks) makes the program exit non-zero.
 //
 // This program intentionally does NOT depend on any of the (not yet
 // existing) cpp/core/ library: Task 1 only creates the fetch logic and
-// this tool. All image loading/resizing here is scratch code for
-// diagnostics, not production preprocessing.
+// this tool. The image loading/resizing here is scratch diagnostic code,
+// not production preprocessing.
 
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -21,6 +26,10 @@
 #include <vector>
 
 namespace {
+
+// MediaPipe's own min_score_thresh for palm detection, from
+// palm_detection_cpu.pbtxt. A best score below this means no detection.
+constexpr float kPalmScoreThreshold = 0.5f;
 
 const char* ElementTypeName(ONNXTensorElementDataType type) {
   switch (type) {
@@ -54,30 +63,38 @@ std::string ShapeToString(const std::vector<int64_t>& shape) {
   return oss.str();
 }
 
-// Prints every input and output tensor's name, shape and element type for
-// a session, as required by Task 1 step 5.
+std::vector<std::string> OutputNames(Ort::Session& session) {
+  Ort::AllocatorWithDefaultOptions allocator;
+  std::vector<std::string> names;
+  for (size_t i = 0; i < session.GetOutputCount(); ++i) {
+    names.emplace_back(session.GetOutputNameAllocated(i, allocator).get());
+  }
+  return names;
+}
+
+// Prints every input and output tensor's name, shape and element type.
 void DescribeSession(const char* label, Ort::Session& session) {
   Ort::AllocatorWithDefaultOptions allocator;
   std::printf("=== %s ===\n", label);
 
-  size_t num_inputs = session.GetInputCount();
-  for (size_t i = 0; i < num_inputs; ++i) {
+  // NOTE: GetTensorTypeAndShapeInfo() returns a non-owning view into the
+  // Ort::TypeInfo, so the TypeInfo must outlive it - keep it in a named
+  // local rather than calling through a temporary.
+  for (size_t i = 0; i < session.GetInputCount(); ++i) {
     auto name = session.GetInputNameAllocated(i, allocator);
     Ort::TypeInfo type_info = session.GetInputTypeInfo(i);
-    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-    std::printf("  input[%zu]  name=%-20s shape=%-24s dtype=%s\n", i,
-                name.get(), ShapeToString(tensor_info.GetShape()).c_str(),
-                ElementTypeName(tensor_info.GetElementType()));
+    auto info = type_info.GetTensorTypeAndShapeInfo();
+    std::printf("  input[%zu]  name=%-20s shape=%-24s dtype=%s\n", i, name.get(),
+                ShapeToString(info.GetShape()).c_str(),
+                ElementTypeName(info.GetElementType()));
   }
-
-  size_t num_outputs = session.GetOutputCount();
-  for (size_t i = 0; i < num_outputs; ++i) {
+  for (size_t i = 0; i < session.GetOutputCount(); ++i) {
     auto name = session.GetOutputNameAllocated(i, allocator);
     Ort::TypeInfo type_info = session.GetOutputTypeInfo(i);
-    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-    std::printf("  output[%zu] name=%-20s shape=%-24s dtype=%s\n", i,
-                name.get(), ShapeToString(tensor_info.GetShape()).c_str(),
-                ElementTypeName(tensor_info.GetElementType()));
+    auto info = type_info.GetTensorTypeAndShapeInfo();
+    std::printf("  output[%zu] name=%-20s shape=%-24s dtype=%s\n", i, name.get(),
+                ShapeToString(info.GetShape()).c_str(),
+                ElementTypeName(info.GetElementType()));
   }
 }
 
@@ -87,79 +104,144 @@ struct RgbImage {
   std::vector<uint8_t> data;  // interleaved RGB8, row-major
 };
 
-// Loads the committed raw fixture: <width> <height> 3 in the .txt sidecar,
+// Loads the committed raw fixture: "<width> <height> 3" in the .txt sidecar
 // and width*height*3 interleaved RGB8 bytes in the .raw file. Uses fread
-// only, matching the constraint that core (and this tool) may not link an
-// image library.
+// only, matching the constraint that core may not link an image library.
 RgbImage LoadRawFixture(const std::string& raw_path, const std::string& txt_path) {
   RgbImage image;
-  {
-    std::ifstream txt(txt_path);
-    if (!txt) throw std::runtime_error("cannot open " + txt_path);
-    int channels = 0;
-    txt >> image.width >> image.height >> channels;
-    if (channels != 3) throw std::runtime_error("fixture must have 3 channels");
+
+  std::ifstream txt(txt_path);
+  if (!txt) throw std::runtime_error("cannot open " + txt_path);
+  int width = 0, height = 0, channels = 0;
+  if (!(txt >> width >> height >> channels)) {
+    throw std::runtime_error("malformed sidecar (expected '<w> <h> <c>'): " + txt_path);
   }
+  if (width <= 0 || height <= 0) {
+    throw std::runtime_error("non-positive dimensions in " + txt_path + ": " +
+                             std::to_string(width) + "x" + std::to_string(height));
+  }
+  if (channels != 3) {
+    throw std::runtime_error("fixture must have 3 channels, got " +
+                             std::to_string(channels) + " in " + txt_path);
+  }
+  image.width = width;
+  image.height = height;
 
   std::FILE* f = std::fopen(raw_path.c_str(), "rb");
   if (!f) throw std::runtime_error("cannot open " + raw_path);
-  size_t expected = static_cast<size_t>(image.width) * image.height * 3;
+  const size_t expected = static_cast<size_t>(width) * height * 3;
   image.data.resize(expected);
-  size_t got = std::fread(image.data.data(), 1, expected, f);
+  const size_t got = std::fread(image.data.data(), 1, expected, f);
   std::fclose(f);
   if (got != expected) {
-    throw std::runtime_error("short read on " + raw_path);
+    throw std::runtime_error("short read on " + raw_path + ": expected " +
+                             std::to_string(expected) + " bytes, got " +
+                             std::to_string(got));
   }
   return image;
 }
 
-// Nearest-neighbor resize with letterboxing (preserve aspect ratio, pad with
-// zeros) to a square target size. This is throwaway diagnostic preprocessing
-// for this tool only; the real resampler is Task 4's job.
-std::vector<float> LetterboxToChw(const RgbImage& img, int target) {
-  float scale = std::min(static_cast<float>(target) / img.width,
-                          static_cast<float>(target) / img.height);
-  int scaled_w = static_cast<int>(img.width * scale);
-  int scaled_h = static_cast<int>(img.height * scale);
-  int pad_x = (target - scaled_w) / 2;
-  int pad_y = (target - scaled_h) / 2;
+// Aspect-preserving resize into a centered target box, zero-padding the
+// remainder (letterbox). Mirrors the intent of MediaPipe's
+// ImageToTensorCalculator with keep_aspect_ratio:true + BORDER_ZERO.
+// Output is NHWC float in [0,1], which is what both models take.
+std::vector<float> LetterboxToNhwc(const RgbImage& img, int target_w, int target_h) {
+  const float scale = std::min(static_cast<float>(target_w) / img.width,
+                               static_cast<float>(target_h) / img.height);
+  const int scaled_w = static_cast<int>(img.width * scale);
+  const int scaled_h = static_cast<int>(img.height * scale);
+  const int pad_x = (target_w - scaled_w) / 2;
+  const int pad_y = (target_h - scaled_h) / 2;
 
-  std::vector<float> chw(static_cast<size_t>(3) * target * target, 0.0f);
+  std::vector<float> nhwc(static_cast<size_t>(target_h) * target_w * 3, 0.0f);
   for (int y = 0; y < scaled_h; ++y) {
-    int src_y = std::min(img.height - 1, static_cast<int>(y / scale));
+    const int src_y = std::min(img.height - 1, static_cast<int>(y / scale));
     for (int x = 0; x < scaled_w; ++x) {
-      int src_x = std::min(img.width - 1, static_cast<int>(x / scale));
+      const int src_x = std::min(img.width - 1, static_cast<int>(x / scale));
       const uint8_t* px = &img.data[(static_cast<size_t>(src_y) * img.width + src_x) * 3];
-      int dst_y = y + pad_y;
-      int dst_x = x + pad_x;
-      for (int c = 0; c < 3; ++c) {
-        chw[static_cast<size_t>(c) * target * target + dst_y * target + dst_x] =
-            px[c] / 255.0f;
-      }
-    }
-  }
-  return chw;
-}
-
-// Simple whole-image resize (no letterbox) to width x height, NHWC uint8->float/255,
-// used for the landmark model which expects a square crop already (we just
-// resize the full fixture into it for this diagnostic run).
-std::vector<float> ResizeToNhwc(const RgbImage& img, int target_w, int target_h) {
-  std::vector<float> nhwc(static_cast<size_t>(target_h) * target_w * 3);
-  for (int y = 0; y < target_h; ++y) {
-    int src_y = std::min(img.height - 1,
-                          static_cast<int>(y * static_cast<float>(img.height) / target_h));
-    for (int x = 0; x < target_w; ++x) {
-      int src_x = std::min(img.width - 1,
-                            static_cast<int>(x * static_cast<float>(img.width) / target_w));
-      const uint8_t* px = &img.data[(static_cast<size_t>(src_y) * img.width + src_x) * 3];
-      size_t dst = (static_cast<size_t>(y) * target_w + x) * 3;
+      const size_t dst = (static_cast<size_t>(y + pad_y) * target_w + (x + pad_x)) * 3;
       nhwc[dst + 0] = px[0] / 255.0f;
       nhwc[dst + 1] = px[1] / 255.0f;
       nhwc[dst + 2] = px[2] / 255.0f;
     }
   }
   return nhwc;
+}
+
+// Plain stretch to target_w x target_h: maps the full source extent onto the
+// target independently per axis, so aspect ratio is NOT preserved. Used only
+// for the landmark path, where the brief asks for "the full image resized to
+// its input size".
+std::vector<float> StretchToNhwc(const RgbImage& img, int target_w, int target_h) {
+  std::vector<float> nhwc(static_cast<size_t>(target_h) * target_w * 3);
+  for (int y = 0; y < target_h; ++y) {
+    const int src_y = std::min(
+        img.height - 1, static_cast<int>(y * static_cast<float>(img.height) / target_h));
+    for (int x = 0; x < target_w; ++x) {
+      const int src_x = std::min(
+          img.width - 1, static_cast<int>(x * static_cast<float>(img.width) / target_w));
+      const uint8_t* px = &img.data[(static_cast<size_t>(src_y) * img.width + src_x) * 3];
+      const size_t dst = (static_cast<size_t>(y) * target_w + x) * 3;
+      nhwc[dst + 0] = px[0] / 255.0f;
+      nhwc[dst + 1] = px[1] / 255.0f;
+      nhwc[dst + 2] = px[2] / 255.0f;
+    }
+  }
+  return nhwc;
+}
+
+// Reads the square input size from an NHWC [1,H,W,3] input spec. Throws if
+// the model does not have the static shape this task recorded.
+void InputSize(Ort::Session& session, const char* label, int* w, int* h) {
+  Ort::TypeInfo type_info = session.GetInputTypeInfo(0);
+  const auto shape = type_info.GetTensorTypeAndShapeInfo().GetShape();
+  if (shape.size() != 4 || shape[1] <= 0 || shape[2] <= 0 || shape[3] != 3) {
+    throw std::runtime_error(std::string(label) +
+                             ": expected static NHWC input [1,H,W,3], got " +
+                             ShapeToString(shape));
+  }
+  *h = static_cast<int>(shape[1]);
+  *w = static_cast<int>(shape[2]);
+}
+
+Ort::Value MakeInput(const std::vector<float>& data, int h, int w,
+                     std::vector<int64_t>* shape_storage) {
+  *shape_storage = {1, h, w, 3};
+  Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  return Ort::Value::CreateTensor<float>(mem, const_cast<float*>(data.data()), data.size(),
+                                         shape_storage->data(), shape_storage->size());
+}
+
+void PrintTriples(const float* data, const char* heading) {
+  std::printf("    %s\n", heading);
+  for (int lm = 0; lm < 21; ++lm) {
+    std::printf("      [%2d] (%.4f, %.4f, %.4f)\n", lm, data[lm * 3 + 0], data[lm * 3 + 1],
+                data[lm * 3 + 2]);
+  }
+}
+
+// Returns true if every triple is identical or every value is zero.
+bool LandmarksDegenerate(const float* data) {
+  bool all_zero = true;
+  for (int i = 0; i < 63; ++i) {
+    if (data[i] != 0.0f) {
+      all_zero = false;
+      break;
+    }
+  }
+  if (all_zero) return true;
+
+  bool all_same = true;
+  for (int lm = 1; lm < 21; ++lm) {
+    for (int c = 0; c < 3; ++c) {
+      if (data[lm * 3 + c] != data[c]) {
+        all_same = false;
+        break;
+      }
+    }
+    if (!all_same) break;
+  }
+  return all_same;
 }
 
 }  // namespace
@@ -184,142 +266,145 @@ int main() {
     DescribeSession("hand_landmark", landmark_session);
     std::printf("\n");
 
-    RgbImage image = LoadRawFixture(fixture_dir + "/hand_rgb.raw", fixture_dir + "/hand_rgb.txt");
+    const RgbImage image =
+        LoadRawFixture(fixture_dir + "/hand_rgb.raw", fixture_dir + "/hand_rgb.txt");
     std::printf("Loaded fixture: %dx%d RGB8\n\n", image.width, image.height);
 
-    // ---- Run palm model ----
+    // ---- Palm model ----
+    // Output names are matched exactly, not guessed from shapes: this task
+    // recorded them, so a rename is a hard failure, not something to sniff.
     {
+      const std::vector<std::string> expected = {"Identity", "Identity_1"};
+      const std::vector<std::string> actual = OutputNames(palm_session);
+      if (actual != expected) {
+        std::fprintf(stderr,
+                     "FATAL: palm model output names changed; expected [Identity, "
+                     "Identity_1], got [");
+        for (size_t i = 0; i < actual.size(); ++i)
+          std::fprintf(stderr, "%s%s", i ? ", " : "", actual[i].c_str());
+        std::fprintf(stderr, "]\n");
+        return 1;
+      }
+
+      int w = 0, h = 0;
+      InputSize(palm_session, "palm model", &w, &h);
+      const std::vector<float> input_data = LetterboxToNhwc(image, w, h);
+      std::vector<int64_t> shape;
+      Ort::Value input_tensor = MakeInput(input_data, h, w, &shape);
+
       Ort::AllocatorWithDefaultOptions allocator;
       auto input_name = palm_session.GetInputNameAllocated(0, allocator);
-      auto input_shape = palm_session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-      // Expect NHWC [1, H, W, 3] per opencv_zoo's mp_palmdet.py preprocessing.
-      int target_h = static_cast<int>(input_shape[1]);
-      int target_w = static_cast<int>(input_shape[2]);
-      if (target_h <= 0 || target_w <= 0) {
-        // Dynamic dims reported as -1; fall back to the known 192x192 used
-        // by opencv_zoo's MPPalmDet.
-        target_h = target_w = 192;
+      const char* input_names[] = {input_name.get()};
+      const char* output_names[] = {expected[0].c_str(), expected[1].c_str()};
+
+      auto outputs = palm_session.Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
+                                      output_names, 2);
+
+      const auto box_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+      const auto score_shape = outputs[1].GetTensorTypeAndShapeInfo().GetShape();
+      std::printf("--- palm model raw outputs (letterboxed input %dx%d) ---\n", w, h);
+      std::printf("  Identity   (boxes+keypoints) shape=%s\n",
+                  ShapeToString(box_shape).c_str());
+      std::printf("  Identity_1 (scores)          shape=%s\n",
+                  ShapeToString(score_shape).c_str());
+
+      if (box_shape.size() != 3 || score_shape.size() != 3 ||
+          box_shape[1] != score_shape[1]) {
+        std::fprintf(stderr, "FATAL: unexpected palm output ranks/anchor counts\n");
+        return 1;
       }
 
-      std::vector<float> input_data = ResizeToNhwc(image, target_w, target_h);
-      std::vector<int64_t> shape = {1, target_h, target_w, 3};
-      Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-          mem_info, input_data.data(), input_data.size(), shape.data(), shape.size());
+      const float* scores = outputs[1].GetTensorData<float>();
+      const float* boxes = outputs[0].GetTensorData<float>();
+      const size_t num_anchors = static_cast<size_t>(score_shape[1]);
+      const size_t box_stride = static_cast<size_t>(box_shape[2]);
 
-      std::vector<const char*> input_names = {input_name.get()};
-      std::vector<std::string> output_name_storage;
-      std::vector<const char*> output_names;
-      for (size_t i = 0; i < palm_session.GetOutputCount(); ++i) {
-        auto n = palm_session.GetOutputNameAllocated(i, allocator);
-        output_name_storage.emplace_back(n.get());
-      }
-      for (auto& s : output_name_storage) output_names.push_back(s.c_str());
-
-      auto outputs = palm_session.Run(Ort::RunOptions{nullptr}, input_names.data(), &input_tensor,
-                                       1, output_names.data(), output_names.size());
-
-      std::printf("--- palm model raw outputs (input %dx%d) ---\n", target_w, target_h);
-      // Identify score tensor (last dim == 1) vs box/landmark tensor (last dim > 4).
-      int score_idx = -1;
-      int box_idx = -1;
-      for (size_t i = 0; i < outputs.size(); ++i) {
-        auto shape_i = outputs[i].GetTensorTypeAndShapeInfo().GetShape();
-        std::printf("  output[%zu] (%s) shape=%s\n", i, output_name_storage[i].c_str(),
-                    ShapeToString(shape_i).c_str());
-        if (!shape_i.empty() && shape_i.back() == 1) score_idx = static_cast<int>(i);
-        if (!shape_i.empty() && shape_i.back() > 4) box_idx = static_cast<int>(i);
-      }
-
-      if (score_idx >= 0 && box_idx >= 0) {
-        const float* scores = outputs[score_idx].GetTensorData<float>();
-        const float* boxes = outputs[box_idx].GetTensorData<float>();
-        auto score_shape = outputs[score_idx].GetTensorTypeAndShapeInfo().GetShape();
-        auto box_shape = outputs[box_idx].GetTensorTypeAndShapeInfo().GetShape();
-        size_t num_anchors = score_shape[score_shape.size() - 2];
-        size_t box_stride = box_shape[box_shape.size() - 1];
-
-        size_t best_idx = 0;
-        float best_raw_score = scores[0];
-        for (size_t i = 1; i < num_anchors; ++i) {
-          if (scores[i] > best_raw_score) {
-            best_raw_score = scores[i];
-            best_idx = i;
-          }
+      size_t best_idx = 0;
+      float best_raw = scores[0];
+      for (size_t i = 1; i < num_anchors; ++i) {
+        if (scores[i] > best_raw) {
+          best_raw = scores[i];
+          best_idx = i;
         }
-        float best_sigmoid = 1.0f / (1.0f + std::exp(-best_raw_score));
-        std::printf("  num_anchors=%zu\n", num_anchors);
-        std::printf("  best raw score=%.6f  sigmoid(score)=%.6f  at anchor index=%zu\n",
-                    best_raw_score, best_sigmoid, best_idx);
-        std::printf("  raw box row at best index: [");
-        for (size_t c = 0; c < box_stride; ++c) {
-          std::printf("%s%.4f", c ? ", " : "", boxes[best_idx * box_stride + c]);
-        }
-        std::printf("]\n");
-      } else {
-        std::printf("  WARNING: could not identify score/box output tensors by shape heuristic\n");
+      }
+      const float best_sigmoid = 1.0f / (1.0f + std::exp(-best_raw));
+      std::printf("  num_anchors=%zu\n", num_anchors);
+      std::printf("  best raw score=%.6f  sigmoid(score)=%.6f  at anchor index=%zu\n",
+                  best_raw, best_sigmoid, best_idx);
+      std::printf("  raw box row at best index: [");
+      for (size_t c = 0; c < box_stride; ++c)
+        std::printf("%s%.4f", c ? ", " : "", boxes[best_idx * box_stride + c]);
+      std::printf("]\n");
+
+      if (best_sigmoid < kPalmScoreThreshold) {
+        std::fprintf(stderr,
+                     "FATAL: best palm score %.6f is below MediaPipe's threshold %.2f "
+                     "- no real detection on the fixture\n",
+                     best_sigmoid, kPalmScoreThreshold);
+        return 1;
       }
     }
     std::printf("\n");
 
-    // ---- Run landmark model ----
+    // ---- Landmark model ----
     {
+      const std::vector<std::string> expected = {"Identity", "Identity_1", "Identity_2",
+                                                 "Identity_3"};
+      const std::vector<std::string> actual = OutputNames(landmark_session);
+      if (actual != expected) {
+        std::fprintf(stderr, "FATAL: landmark model output names changed; got [");
+        for (size_t i = 0; i < actual.size(); ++i)
+          std::fprintf(stderr, "%s%s", i ? ", " : "", actual[i].c_str());
+        std::fprintf(stderr, "]\n");
+        return 1;
+      }
+
+      int w = 0, h = 0;
+      InputSize(landmark_session, "landmark model", &w, &h);
+      // Per the brief: the full image resized to the model's input size.
+      // This is a plain stretch; aspect ratio is NOT preserved.
+      const std::vector<float> input_data = StretchToNhwc(image, w, h);
+      std::vector<int64_t> shape;
+      Ort::Value input_tensor = MakeInput(input_data, h, w, &shape);
+
       Ort::AllocatorWithDefaultOptions allocator;
       auto input_name = landmark_session.GetInputNameAllocated(0, allocator);
-      auto input_shape =
-          landmark_session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-      int target_h = static_cast<int>(input_shape[1]);
-      int target_w = static_cast<int>(input_shape[2]);
-      if (target_h <= 0 || target_w <= 0) {
-        target_h = target_w = 224;  // opencv_zoo MPHandPose default.
+      const char* input_names[] = {input_name.get()};
+      const char* output_names[] = {expected[0].c_str(), expected[1].c_str(),
+                                    expected[2].c_str(), expected[3].c_str()};
+
+      auto outputs = landmark_session.Run(Ort::RunOptions{nullptr}, input_names,
+                                          &input_tensor, 1, output_names, 4);
+
+      std::printf("--- landmark model raw outputs (stretched input %dx%d) ---\n", w, h);
+      const char* meanings[] = {"screen-space landmarks", "hand presence",
+                                "handedness", "world-space landmarks"};
+      for (size_t i = 0; i < 4; ++i) {
+        std::printf("  output[%zu] %-10s (%s) shape=%s\n", i, expected[i].c_str(),
+                    meanings[i],
+                    ShapeToString(outputs[i].GetTensorTypeAndShapeInfo().GetShape()).c_str());
       }
 
-      std::vector<float> input_data = ResizeToNhwc(image, target_w, target_h);
-      std::vector<int64_t> shape = {1, target_h, target_w, 3};
-      Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-          mem_info, input_data.data(), input_data.size(), shape.data(), shape.size());
+      const float* screen = outputs[0].GetTensorData<float>();
+      const float* world = outputs[3].GetTensorData<float>();
+      PrintTriples(screen, "21 screen-space landmark triples (x,y in input px, z rel. depth):");
+      std::printf("  presence  (Identity_1) = %.6f\n", outputs[1].GetTensorData<float>()[0]);
+      std::printf("  handedness(Identity_2) = %.6f\n", outputs[2].GetTensorData<float>()[0]);
+      PrintTriples(world, "21 world-space landmark triples (metres, origin at ROI centre):");
 
-      std::vector<const char*> input_names = {input_name.get()};
-      std::vector<std::string> output_name_storage;
-      std::vector<const char*> output_names;
-      for (size_t i = 0; i < landmark_session.GetOutputCount(); ++i) {
-        auto n = landmark_session.GetOutputNameAllocated(i, allocator);
-        output_name_storage.emplace_back(n.get());
+      if (LandmarksDegenerate(screen)) {
+        std::fprintf(stderr, "FATAL: screen-space landmarks are degenerate "
+                             "(all zero or all identical)\n");
+        return 1;
       }
-      for (auto& s : output_name_storage) output_names.push_back(s.c_str());
-
-      auto outputs = landmark_session.Run(Ort::RunOptions{nullptr}, input_names.data(),
-                                           &input_tensor, 1, output_names.data(),
-                                           output_names.size());
-
-      std::printf("--- landmark model raw outputs (input %dx%d) ---\n", target_w, target_h);
-      for (size_t i = 0; i < outputs.size(); ++i) {
-        auto shape_i = outputs[i].GetTensorTypeAndShapeInfo().GetShape();
-        size_t count = 1;
-        for (auto d : shape_i) count *= static_cast<size_t>(std::max<int64_t>(d, 1));
-        std::printf("  output[%zu] (%s) shape=%s\n", i, output_name_storage[i].c_str(),
-                    ShapeToString(shape_i).c_str());
-
-        const float* data = outputs[i].GetTensorData<float>();
-        if (count == 63) {
-          std::printf("    21 landmark triples:\n");
-          for (int lm = 0; lm < 21; ++lm) {
-            std::printf("      [%2d] (%.4f, %.4f, %.4f)\n", lm, data[lm * 3 + 0],
-                        data[lm * 3 + 1], data[lm * 3 + 2]);
-          }
-        } else if (count == 1) {
-          std::printf("    scalar value = %.6f\n", data[0]);
-        } else {
-          std::printf("    (%zu raw values, first few: ", count);
-          for (size_t v = 0; v < std::min<size_t>(count, 6); ++v) {
-            std::printf("%s%.4f", v ? ", " : "", data[v]);
-          }
-          std::printf(")\n");
-        }
+      if (LandmarksDegenerate(world)) {
+        std::fprintf(stderr, "FATAL: world-space landmarks are degenerate "
+                             "(all zero or all identical)\n");
+        return 1;
       }
     }
 
+    std::printf("\nAll checks passed.\n");
     return 0;
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "FATAL: %s\n", ex.what());
