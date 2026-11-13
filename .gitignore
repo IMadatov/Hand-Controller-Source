@@ -2,5 +2,6 @@
 hand_controller_env
 output
 dist
-buildbuild-asan
+build
+build-asan
 cpp/build*/
