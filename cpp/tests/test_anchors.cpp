@@ -74,6 +74,42 @@ TEST(Anchors, AnchorsAreGroupedByStrideInOrder) {
     EXPECT_NEAR(scaled_x, std::round(scaled_x), 1e-4f);
     EXPECT_NEAR(scaled_y, std::round(scaled_y), 1e-4f);
   }
+
+  // Grid alignment and the stride-8-before-stride-16 macro order above hold
+  // identically under a layer-major emission (three separate passes over
+  // three 12x12 maps, 2 anchors per cell each): same 864 anchors, same
+  // alignment, same macro order -- only the order *within* the stride-16
+  // block differs. Task 6 decodes output rows positionally against this
+  // vector, so the within-block order is load-bearing and must be pinned
+  // directly. Assert cell-major adjacency: all anchors of one cell are
+  // contiguous before the next cell begins.
+  //
+  // Stride 8: 2 anchors per cell (1 aspect ratio + 1 interpolated scale), so
+  // anchors 0 and 1 share a center and anchor 2 advances to the next cell.
+  EXPECT_NEAR(anchors[1].x_center, anchors[0].x_center, 1e-6f);
+  EXPECT_NEAR(anchors[1].y_center, anchors[0].y_center, 1e-6f);
+  EXPECT_NEAR(anchors[2].x_center, anchors[0].x_center + kStride8CellSize,
+              1e-6f);
+  EXPECT_NEAR(anchors[2].y_center, anchors[0].y_center, 1e-6f);
+
+  // Stride 16: 6 anchors per cell (3 coalesced layers x 2). The first 6
+  // anchors of the block must all share one center, and the 7th must differ
+  // -- it is the next cell. Under layer-major, anchors 0 and 1 of the block
+  // share a center but anchor 2 does not, so this discriminates.
+  const Anchor& s16 = anchors[kStride8Count];
+  for (std::size_t k = 1; k < 6; ++k) {
+    const Anchor& a = anchors[kStride8Count + k];
+    EXPECT_NEAR(a.x_center, s16.x_center, 1e-6f)
+        << "stride-16 anchor " << k
+        << " must share cell 0's center (cell-major emission)";
+    EXPECT_NEAR(a.y_center, s16.y_center, 1e-6f)
+        << "stride-16 anchor " << k
+        << " must share cell 0's center (cell-major emission)";
+  }
+  const Anchor& s16_next_cell = anchors[kStride8Count + 6];
+  EXPECT_NEAR(s16_next_cell.x_center, s16.x_center + kStride16CellSize, 1e-6f)
+      << "the 7th stride-16 anchor must advance to the next cell";
+  EXPECT_NEAR(s16_next_cell.y_center, s16.y_center, 1e-6f);
 }
 
 TEST(Anchors, DuplicateStridesProduceDistinctAnchorsPerLayer) {
@@ -88,7 +124,44 @@ TEST(Anchors, DuplicateStridesProduceDistinctAnchorsPerLayer) {
   // 1440.
   const std::vector<Anchor> anchors = GenerateAnchors(PalmAnchorOptions());
   constexpr std::size_t kStride8Count = 576 * 2;
+  constexpr float kStride16CellSize = 1.0f / 12.0f;
   const std::size_t stride16_count = anchors.size() - kStride8Count;
   EXPECT_EQ(stride16_count, std::size_t{144 * 6});
   EXPECT_EQ(stride16_count, std::size_t{864});
+
+  // The bare total above is satisfied by a layer-major emission too, so
+  // assert per-cell multiplicity *contiguously*: walk the stride-16 block in
+  // chunks of 6 and require every chunk to be one cell repeated 6 times
+  // (3 coalesced layers x 1 aspect ratio x 2 from the interpolated scale).
+  // Under layer-major each center still appears 6 times overall, but chunk 0
+  // would read cell0, cell0, cell1, cell1, cell2, cell2 -- so the
+  // contiguity is what discriminates.
+  constexpr std::size_t kAnchorsPerStride16Cell = 6;
+  ASSERT_EQ(stride16_count % kAnchorsPerStride16Cell, std::size_t{0});
+  const std::size_t num_cells = stride16_count / kAnchorsPerStride16Cell;
+  EXPECT_EQ(num_cells, std::size_t{144});
+
+  for (std::size_t cell = 0; cell < num_cells; ++cell) {
+    const std::size_t base = kStride8Count + cell * kAnchorsPerStride16Cell;
+    const Anchor& first = anchors[base];
+    for (std::size_t k = 1; k < kAnchorsPerStride16Cell; ++k) {
+      EXPECT_NEAR(anchors[base + k].x_center, first.x_center, 1e-6f)
+          << "stride-16 cell " << cell << " anchor " << k
+          << ": each cell's 6 anchors must be contiguous";
+      EXPECT_NEAR(anchors[base + k].y_center, first.y_center, 1e-6f)
+          << "stride-16 cell " << cell << " anchor " << k
+          << ": each cell's 6 anchors must be contiguous";
+    }
+    // ...and consecutive chunks must be *different* cells, so the 144 chunks
+    // cover 144 distinct centers rather than repeating one.
+    if (cell + 1 < num_cells) {
+      const Anchor& next = anchors[base + kAnchorsPerStride16Cell];
+      const bool advanced =
+          std::abs(next.x_center - first.x_center) > 0.5f * kStride16CellSize ||
+          std::abs(next.y_center - first.y_center) > 0.5f * kStride16CellSize;
+      EXPECT_TRUE(advanced)
+          << "stride-16 chunk " << cell + 1
+          << " must be a different cell than chunk " << cell;
+    }
+  }
 }

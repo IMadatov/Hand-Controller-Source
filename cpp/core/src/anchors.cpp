@@ -1,5 +1,6 @@
 #include "hc/anchors.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -27,9 +28,18 @@ float CalculateScale(float min_scale, float max_scale, int stride_index,
 std::vector<Anchor> GenerateAnchors(const AnchorOptions& o) {
   std::vector<Anchor> anchors;
 
-  const int num_strides = static_cast<int>(o.strides.size());
+  // num_layers is the authoritative layer count and the outer loop bound,
+  // matching MediaPipe's SsdAnchorsCalculator, with `strides` indexed inside
+  // it. Clamp to strides.size() so a num_layers larger than the stride list
+  // cannot index out of bounds (and a negative one cannot wrap when cast).
+  const std::size_t num_layers =
+      (o.num_layers <= 0)
+          ? std::size_t{0}
+          : std::min(static_cast<std::size_t>(o.num_layers), o.strides.size());
+  const int num_strides = static_cast<int>(num_layers);
+
   std::size_t layer_id = 0;
-  while (layer_id < o.strides.size()) {
+  while (layer_id < num_layers) {
     std::vector<float> anchor_height;
     std::vector<float> anchor_width;
     std::vector<float> aspect_ratios;
@@ -41,7 +51,7 @@ std::vector<Anchor> GenerateAnchors(const AnchorOptions& o) {
     // layer contributes its own full set of aspect_ratios plus (if
     // interpolated_scale_aspect_ratio > 0) one extra interpolated anchor.
     std::size_t last_same_stride_layer = layer_id;
-    while (last_same_stride_layer < o.strides.size() &&
+    while (last_same_stride_layer < num_layers &&
            o.strides[last_same_stride_layer] == o.strides[layer_id]) {
       const float scale = CalculateScale(
           o.min_scale, o.max_scale, static_cast<int>(last_same_stride_layer),
@@ -52,7 +62,7 @@ std::vector<Anchor> GenerateAnchors(const AnchorOptions& o) {
       }
       if (o.interpolated_scale_aspect_ratio > 0.0f) {
         const float scale_next =
-            (last_same_stride_layer == o.strides.size() - 1)
+            (last_same_stride_layer == num_layers - 1)
                 ? 1.0f
                 : CalculateScale(o.min_scale, o.max_scale,
                                   static_cast<int>(last_same_stride_layer) + 1,

@@ -11,6 +11,10 @@ namespace hc {
 // on the proto2 default).
 struct AnchorOptions {
   int input_w, input_h;
+  // The authoritative layer count and the bound of GenerateAnchors' outer
+  // layer walk; `strides` is indexed inside it. Clamped to strides.size()
+  // internally, so a num_layers exceeding the stride list is safe (the
+  // excess layers are simply not walked) rather than out of bounds.
   int num_layers;
   float min_scale, max_scale;
   float anchor_offset_x, anchor_offset_y;
