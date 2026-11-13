@@ -1,5 +1,0 @@
-if(EXISTS "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_warp[1]_tests.cmake")
-  include("/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_warp[1]_tests.cmake")
-else()
-  add_test(test_warp_NOT_BUILT test_warp_NOT_BUILT)
-endif()

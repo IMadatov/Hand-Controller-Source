@@ -1,5 +1,0 @@
-if(EXISTS "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_geometry[1]_tests.cmake")
-  include("/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_geometry[1]_tests.cmake")
-else()
-  add_test(test_geometry_NOT_BUILT test_geometry_NOT_BUILT)
-endif()
