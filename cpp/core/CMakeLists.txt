@@ -7,6 +7,8 @@ add_library(hc_core STATIC
   src/roi.cpp
   src/hand_tracker_onnx.cpp
   src/association.cpp
+  src/synthetic_frame_source.cpp
+  src/latest_frame_source.cpp
 )
 
 target_include_directories(hc_core PUBLIC
@@ -17,6 +19,11 @@ target_include_directories(hc_core PUBLIC
 # prebuilt, pinned, Android-capable inference runtime, unlike OpenCV/X11 which
 # hc_assert_no_forbidden_deps below still rejects. PUBLIC so test and app
 # targets inherit the include path and the imported shared library.
-target_link_libraries(hc_core PUBLIC onnxruntime::onnxruntime)
+# LatestFrameSource runs its inner source on a std::thread, so hc_core needs
+# the platform's threading library. Threads::Threads is a CMake-provided
+# imported target, not a forbidden dependency.
+find_package(Threads REQUIRED)
+
+target_link_libraries(hc_core PUBLIC onnxruntime::onnxruntime Threads::Threads)
 
 hc_assert_no_forbidden_deps(hc_core)
