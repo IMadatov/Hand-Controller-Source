@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/CMakeFiles/onnxruntime_release-populate"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/CMakeFiles/onnxruntime_release-populate.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/CMakeFiles/onnxruntime_release-populate-complete.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-build.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-configure.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-download.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-install.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-mkdir.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-patch.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-test.rule"
+		},
+		{
+			"file" : "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/_deps/onnxruntime_release-subbuild/onnxruntime_release-populate-prefix/src/onnxruntime_release-populate-stamp/onnxruntime_release-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"onnxruntime_release-populate"
+		],
+		"name" : "onnxruntime_release-populate"
+	}
+}

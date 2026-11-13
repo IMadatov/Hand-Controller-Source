@@ -43,9 +43,14 @@ struct HandTrackerConfig {
   std::string palm_model_path;
   std::string landmark_model_path;
 
-  // Upper bound on simultaneously tracked hands. Task 8 implements the
-  // single-hand path only and treats anything >= 1 as 1; the multi-hand
-  // association that makes a value of 2 meaningful is Tasks 9/10.
+  // Upper bound on simultaneously tracked hands.
+  //
+  // This default of 2 is FORWARD-LOOKING. As of this phase only the
+  // single-hand path exists, and HandTrackerOnnx's constructor THROWS
+  // std::invalid_argument on max_hands > 1 rather than silently tracking one
+  // hand anyway. A caller today must therefore set this to 1 explicitly; the
+  // default becomes usable when Task 10 adds two-hand association and lifts
+  // the guard.
   int max_hands = 2;
 
   // A track is dropped when the landmark model's presence output falls below

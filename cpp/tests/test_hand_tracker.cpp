@@ -1,8 +1,9 @@
 #include "hc/hand_tracker_onnx.hpp"
 
 #include <cmath>
-#include <cstring>
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -29,31 +30,45 @@ constexpr int kFixtureW = 640;
 constexpr int kFixtureH = 480;
 constexpr std::uint8_t kMidGray = 128;
 
-// Rows of black padding a correct letterbox adds above (and below) the
-// 640x480 fixture when squaring it: (640 - 480) / 2.
-constexpr int kPadRows = (kFixtureW - kFixtureH) / 2;
+// A black square canvas with `src` embedded in it, plus the row offset at
+// which `src` was placed. The offset is DERIVED from the image actually
+// passed in, not from a file-scope constant: a fixture of a different height
+// must either be centered correctly or fail the assertion below, never
+// silently mis-centre and turn the pixel comparison into nonsense.
+struct PaddedSquare {
+  hc_test::OwnedImage image;
+  int pad_rows;
+};
 
-// Embeds `src` into a black kFixtureW x kFixtureW square, centered
-// vertically. This is, pixel for pixel, exactly what a correct letterbox of
-// the 640x480 fixture produces: the same content, with kPadRows rows of
-// zeros above and below. See LetterboxMatchesPaddedSquareInput.
-hc_test::OwnedImage MakeBlackPaddedSquare(const hc::ImageView& src) {
-  hc_test::OwnedImage img;
+// Embeds `src` into a black `src.width x src.width` square, centered
+// vertically. This is, pixel for pixel, exactly what a correct letterbox of a
+// landscape frame produces: the same content, with `pad_rows` rows of zeros
+// above and below. See LetterboxMatchesPaddedSquareInput.
+//
+// Requires a landscape (or square) source: a portrait image would need
+// horizontal padding instead, and `src.height > src.width` would index past
+// the end of the canvas. Asserted rather than assumed.
+PaddedSquare MakeBlackPaddedSquare(const hc::ImageView& src) {
   const int side = src.width;
-  img.pixels.assign(static_cast<std::size_t>(side) * side * 3u, 0);
+  EXPECT_GE(src.width, src.height)
+      << "MakeBlackPaddedSquare needs a landscape source";
+
+  PaddedSquare out;
+  out.pad_rows = (src.width - src.height) / 2;
+  out.image.pixels.assign(static_cast<std::size_t>(side) * side * 3u, 0);
   for (int y = 0; y < src.height; ++y) {
     const std::uint8_t* s = src.data + static_cast<std::size_t>(y) * src.stride;
     std::uint8_t* d =
-        img.pixels.data() +
-        static_cast<std::size_t>(y + kPadRows) * side * 3u;
+        out.image.pixels.data() +
+        static_cast<std::size_t>(y + out.pad_rows) * side * 3u;
     std::memcpy(d, s, static_cast<std::size_t>(src.width) * 3u);
   }
-  img.view.data = img.pixels.data();
-  img.view.width = side;
-  img.view.height = side;
-  img.view.stride = side * 3;
-  img.view.format = src.format;
-  return img;
+  out.image.view.data = out.image.pixels.data();
+  out.image.view.width = side;
+  out.image.view.height = side;
+  out.image.view.stride = side * 3;
+  out.image.view.format = src.format;
+  return out;
 }
 
 }  // namespace
@@ -140,13 +155,22 @@ TEST(HandTracker, ReDetectsAfterHandDisappears) {
   t.Process(img.view, 0, obs);
   ASSERT_EQ(obs.size(), 1u);
   EXPECT_EQ(m.Get(Stage::PalmDetect).calls, 1u);
+  const std::uint32_t first_id = obs[0].track_id;
+  // Task 9 builds association on top of track_id, so pin its contract here:
+  // 0 is reserved as "no track", and a track that was lost and re-acquired
+  // must NOT reuse the old identity -- otherwise a consumer holding state
+  // keyed by track_id would silently stitch two different hands together.
+  EXPECT_NE(first_id, 0u);
 
   t.Process(blank.view, 1, obs);
   EXPECT_TRUE(obs.empty());
 
   t.Process(img.view, 2, obs);
   EXPECT_EQ(m.Get(Stage::PalmDetect).calls, 2u);
-  EXPECT_EQ(obs.size(), 1u);
+  ASSERT_EQ(obs.size(), 1u);
+  EXPECT_NE(obs[0].track_id, 0u);
+  EXPECT_NE(obs[0].track_id, first_id)
+      << "re-detection reused the lost track's id";
 }
 
 TEST(HandTracker, ResetClearsTrackingState) {
@@ -203,30 +227,56 @@ TEST(HandTracker, LetterboxMatchesPaddedSquareInput) {
   // entire rest of the suite.
   Metrics m1, m2;
   const auto img = LoadRawFixture("hand_rgb");
+  // Pin the fixture's own geometry. The padding offset is derived from the
+  // image, so a resized fixture stays self-consistent, but the absolute-pixel
+  // arithmetic below is written against these dimensions and must fail
+  // loudly, not drift, if the fixture is ever replaced.
+  ASSERT_EQ(img.view.width, kFixtureW);
+  ASSERT_EQ(img.view.height, kFixtureH);
+
   const auto padded = MakeBlackPaddedSquare(img.view);
-  ASSERT_EQ(padded.view.width, kFixtureW);
-  ASSERT_EQ(padded.view.height, kFixtureW);
+  ASSERT_EQ(padded.image.view.width, kFixtureW);
+  ASSERT_EQ(padded.image.view.height, kFixtureW);
+  ASSERT_EQ(padded.pad_rows, (kFixtureW - kFixtureH) / 2);
 
   std::vector<HandObservation> a, b;
   HandTrackerOnnx t1(DefaultTestConfig(/*max_hands=*/1), m1);
   t1.Process(img.view, 0, a);
   HandTrackerOnnx t2(DefaultTestConfig(/*max_hands=*/1), m2);
-  t2.Process(padded.view, 0, b);
+  t2.Process(padded.image.view, 0, b);
 
   ASSERT_EQ(a.size(), 1u);
   ASSERT_EQ(b.size(), 1u);
 
   for (int i = 0; i < 21; ++i) {
     // Both normalized spaces back to the same absolute pixel grid: the
-    // padded image's rows are offset by kPadRows relative to the fixture's.
+    // padded image's rows are offset by pad_rows relative to the fixture's.
     const float ax = a[0].landmarks[i].x * kFixtureW;
     const float ay = a[0].landmarks[i].y * kFixtureH;
     const float bx = b[0].landmarks[i].x * kFixtureW;
-    const float by = b[0].landmarks[i].y * kFixtureW - kPadRows;
+    const float by = b[0].landmarks[i].y * kFixtureW -
+                     static_cast<float>(padded.pad_rows);
     // 6 px on a 640 px frame (~1%). Comfortably above the resampling and
     // float noise between two numerically distinct paths to the same crop,
     // and far below the tens of pixels an aspect distortion moves a hand.
     EXPECT_NEAR(ax, bx, 6.0f) << "landmark " << i << " x";
     EXPECT_NEAR(ay, by, 6.0f) << "landmark " << i << " y";
   }
+}
+
+TEST(HandTracker, RejectsConfigsOtherThanSingleHand) {
+  // Fix round (b): max_hands used to be accepted and silently ignored. The
+  // constructor now refuses anything but 1, so Task 10 must deliberately
+  // lift the guard (and update this test) rather than discover by experiment
+  // that asking for two hands quietly yields one.
+  //
+  // Note HandTrackerConfig::max_hands defaults to 2 -- forward-looking, per
+  // the brief -- so the default-constructed config is among the rejected
+  // ones today. That is intentional and documented on the field.
+  Metrics m;
+  EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/2), m),
+               std::invalid_argument);
+  EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/0), m),
+               std::invalid_argument);
+  EXPECT_NO_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/1), m));
 }

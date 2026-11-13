@@ -120,13 +120,50 @@ class HandTrackerOnnx::Impl {
         anchors_(GenerateAnchors(PalmAnchorOptions())),
         palm_roi_opts_(DefaultPalmRoiOptions()),
         landmark_roi_opts_(DefaultLandmarkRoiOptions()) {
+    // Task 8 scope is ONE hand. Rejecting max_hands > 1 outright, rather than
+    // accepting it and quietly returning a single observation, so that Task
+    // 10 (two-hand association) must consciously lift this guard instead of
+    // discovering by experiment that the field was inert. HandTrackerConfig's
+    // own default is 2 -- forward-looking, per the phase-1 brief -- so today
+    // a caller must pass 1 explicitly.
+    if (config.max_hands > 1) {
+      throw std::invalid_argument(
+          "HandTrackerOnnx: max_hands > 1 is not implemented in this phase "
+          "(single-hand tracking only; multi-hand association is Task 10). "
+          "Pass max_hands = 1.");
+    }
+    if (config.max_hands < 1) {
+      throw std::invalid_argument("HandTrackerOnnx: max_hands must be >= 1");
+    }
+
     palm_decode_opts_ = PalmDecodeDefaults();
-    palm_decode_opts_.input_w = palm_side_;
-    palm_decode_opts_.input_h = palm_side_;
-    // Task 8 consumes one hand; capping the decoder keeps NMS from doing work
-    // whose result is discarded. Tasks 9/10 raise this to config_.max_hands
-    // once association exists.
+    // The decoder caps at one result because this phase consumes one hand;
+    // that keeps NMS from doing work whose result is discarded. Tasks 9/10
+    // raise it to config_.max_hands once association exists.
     palm_decode_opts_.max_results = 1;
+
+    // The palm input size is PINNED at 192, not adapted to whatever model is
+    // loaded. Adapting is not actually achievable: the decode scales
+    // (x/y/w/h_scale, palm_decode.cpp:80-83) and the whole anchor grid
+    // (PalmAnchorOptions' strides {8,16,16,16} and min/max_scale) are tied to
+    // this specific network's architecture, and a differently-sized palm
+    // model would need a stride list that cannot be derived from its input
+    // shape. Every one of those values is pinned verbatim from
+    // cpp/docs/models.md. Note that PalmDecodeOptions::input_w/input_h are
+    // read by nobody -- DecodePalmDetections never touches them -- so setting
+    // them from the model would have looked adaptive while changing nothing.
+    //
+    // So instead of faking adaptivity, this asserts the pin: a swapped model
+    // fails loudly at construction rather than decoding silent nonsense.
+    if (palm_side_ != palm_decode_opts_.input_w ||
+        palm_side_ != palm_decode_opts_.input_h) {
+      throw std::runtime_error(
+          "palm model input side is " + std::to_string(palm_side_) +
+          ", but the decode scales and anchor grid are pinned to " +
+          std::to_string(palm_decode_opts_.input_w) +
+          " (cpp/docs/models.md). This code does not support a resized palm "
+          "model.");
+    }
 
     ValidatePalmOutputs();
 

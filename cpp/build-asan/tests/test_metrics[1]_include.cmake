@@ -1,0 +1,5 @@
+if(EXISTS "/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_metrics[1]_tests.cmake")
+  include("/home/user01/Documents/GitHub/Hand-Controller-Source/cpp/build-asan/tests/test_metrics[1]_tests.cmake")
+else()
+  add_test(test_metrics_NOT_BUILT test_metrics_NOT_BUILT)
+endif()

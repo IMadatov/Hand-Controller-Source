@@ -27,8 +27,13 @@ namespace hc {
 // runs, and the track is dropped when presence falls below
 // HandTrackerConfig::min_presence.
 //
-// Task 8 scope: ONE hand. `max_hands > 1` does not yet yield more than one
-// observation; multi-hand association is Tasks 9/10.
+// Task 8 scope: ONE hand. The constructor THROWS std::invalid_argument on
+// `max_hands > 1` rather than accepting it and quietly producing a single
+// observation; multi-hand association is Tasks 9/10, which lift that guard.
+//
+// The palm detector's 192x192 input size is PINNED, not adapted: the decode
+// scales and the SSD anchor grid are tied to that specific architecture. The
+// constructor throws if the loaded model's input side is anything else.
 //
 // ONNX Runtime types are deliberately kept out of this header (pimpl), so
 // that including it does not drag <onnxruntime_cxx_api.h> into the app or
@@ -39,9 +44,10 @@ namespace hc {
 class HandTrackerOnnx : public IHandTracker {
  public:
   // Loads both models eagerly and generates the SSD anchor grid once.
-  // Throws (Ort::Exception, or std::runtime_error for a shape/name mismatch)
-  // if either model is missing or does not have the tensor layout recorded
-  // in cpp/docs/models.md. `metrics` must outlive this object.
+  // Throws: Ort::Exception if either model is missing or malformed;
+  // std::runtime_error if a model's tensor layout or input size differs from
+  // what cpp/docs/models.md records; std::invalid_argument if
+  // config.max_hands is not exactly 1. `metrics` must outlive this object.
   HandTrackerOnnx(const HandTrackerConfig& config, Metrics& metrics);
   ~HandTrackerOnnx() override;
 
