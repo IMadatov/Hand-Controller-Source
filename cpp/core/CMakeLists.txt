@@ -3,6 +3,7 @@ add_library(hc_core STATIC
   src/metrics.cpp
   src/warp.cpp
   src/anchors.cpp
+  src/palm_decode.cpp
 )
 
 target_include_directories(hc_core PUBLIC
