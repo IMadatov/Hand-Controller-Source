@@ -213,6 +213,41 @@ TEST(Roi, PalmAndLandmarkOptionsDifferAndBothApply) {
   const RotatedRect lm_roi =
       RoiFromLandmarks(lm, /*aspect=*/1.0f, DefaultLandmarkRoiOptions());
 
+  // Exact expected rects, so a cross-wired constant set actually fails here
+  // (EXPECT_NE alone would not: feeding the palm's scale 2.6 into the
+  // landmark path gives w = 1.04, still != the palm's 0.52).
+  //
+  // Palm path: box (0.3, 0.3, 0.2, 0.2) -> center (0.4, 0.4), w = h = 0.2.
+  //   rotation: kp0 (0.5, 0.7), kp2 (0.5, 0.3) -> dx = 0,
+  //     dy = -(0.3 - 0.7) = 0.4 -> atan2(0.4, 0) = pi/2 -> rot = 0.
+  //   shift (rot 0): dy = h * shift_y = 0.2 * (-0.5) = -0.1
+  //     -> center (0.4, 0.3).
+  //   square_long: 0.2 x 0.2 at aspect 1 is already square, no-op.
+  //   scale 2.6: w = h = 0.2 * 2.6 = 0.52.
+  EXPECT_NEAR(palm_roi.center.x, 0.4f, 1e-4f);
+  EXPECT_NEAR(palm_roi.center.y, 0.3f, 1e-4f);
+  EXPECT_NEAR(palm_roi.w, 0.52f, 1e-4f);
+  EXPECT_NEAR(palm_roi.h, 0.52f, 1e-4f);
+  EXPECT_NEAR(palm_roi.rotation_rad, 0.0f, 1e-4f);
+
+  // Landmark path: the 12-point subset spans x in [0.3, 0.5] and
+  // y in [0.3, 0.7] (lm[0] at y = 0.7 is the lowest subset point) ->
+  //   box 0.2 x 0.4, center (0.4, 0.5).
+  //   rotation: origin lm[0] (0.5, 0.7), weighted target (0.5, 0.3)
+  //     (all three MCPs coincide) -> dx = 0, dy = 0.4 -> rot = 0.
+  //   shift (rot 0): dy = h * shift_y = 0.4 * (-0.1) = -0.04
+  //     -> center (0.4, 0.46).
+  //   square_long: w_px = 0.2, h_px = 0.4 -> h is longer,
+  //     so w grows to h / aspect = 0.4 -> 0.4 x 0.4.
+  //   scale 2.0: w = h = 0.4 * 2.0 = 0.8.
+  EXPECT_NEAR(lm_roi.center.x, 0.4f, 1e-4f);
+  EXPECT_NEAR(lm_roi.center.y, 0.46f, 1e-4f);
+  EXPECT_NEAR(lm_roi.w, 0.8f, 1e-4f);
+  EXPECT_NEAR(lm_roi.h, 0.8f, 1e-4f);
+  EXPECT_NEAR(lm_roi.rotation_rad, 0.0f, 1e-4f);
+
+  // And they genuinely differ, which is the regression this test is named
+  // for.
   EXPECT_NE(palm_roi.w, lm_roi.w);
   EXPECT_NE(palm_roi.h, lm_roi.h);
   EXPECT_NE(palm_roi.center.y, lm_roi.center.y);
@@ -355,4 +390,72 @@ TEST(Roi, RoiFromPalmUsesDetectionBoxNotKeypointHull) {
   EXPECT_NEAR(roi.center.y, 0.4f, 1e-3f);
   EXPECT_NEAR(roi.w, 0.26f, 1e-3f);
   EXPECT_NEAR(roi.h, 0.26f, 1e-3f);
+}
+
+TEST(Roi, LandmarkAspectFactorChangesRotation) {
+  // Landmark-path twin of AspectFactorChangesRotation. Both paths currently
+  // share one ComputeRotation helper, so the palm-only test happens to
+  // cover this -- but that is an implementation coincidence, not a pinned
+  // contract. If the helper is ever duplicated or inlined, the landmark
+  // path could silently lose the aspect factor while the suite stayed
+  // green. Aspect-dependent rotation is invisible on a square test frame
+  // and wrong on every real camera, so pin it on this path directly.
+  //
+  //   origin lm[0] = (0.5, 0.6); all three rotation targets at (0.3, 0.4),
+  //   so the weighted average is (0.3, 0.4) whatever the weights.
+  //   dx_norm = 0.3 - 0.5 = -0.2,  dy = -(0.4 - 0.6) = 0.2
+  //   aspect = 1.0:    atan2(0.2, -0.2)       = 2.356194 rad
+  //       rotation = pi/2 - 2.356194 = -0.785398 rad (== -pi/4)
+  //   aspect = 16/9:   atan2(0.2, -0.355556)  = 2.629011 rad
+  //       rotation = pi/2 - 2.629011 = -1.058407 rad
+  std::array<Point2, 21> lm = ParkedLandmarks(Point2{0.4f, 0.5f});
+  lm[0] = Point2{0.5f, 0.6f};
+  lm[5] = Point2{0.3f, 0.4f};
+  lm[9] = Point2{0.3f, 0.4f};
+  lm[13] = Point2{0.3f, 0.4f};
+  // A non-degenerate bbox subset, so the rect itself is well-formed.
+  lm[1] = Point2{0.25f, 0.35f};
+  lm[2] = Point2{0.55f, 0.35f};
+  lm[3] = Point2{0.25f, 0.65f};
+  lm[6] = Point2{0.55f, 0.65f};
+  lm[10] = Point2{0.3f, 0.5f};
+  lm[14] = Point2{0.5f, 0.5f};
+  lm[17] = Point2{0.35f, 0.5f};
+  lm[18] = Point2{0.45f, 0.5f};
+
+  const LandmarkRoiOptions o = DefaultLandmarkRoiOptions();
+  const RotatedRect roi_square = RoiFromLandmarks(lm, 1.0f, o);
+  const RotatedRect roi_wide = RoiFromLandmarks(lm, 16.0f / 9.0f, o);
+
+  EXPECT_NEAR(roi_square.rotation_rad, -kPi / 4.0f, 1e-3f);
+  EXPECT_NEAR(roi_wide.rotation_rad, -1.058407f, 1e-3f);
+  EXPECT_GT(std::fabs(roi_square.rotation_rad - roi_wide.rotation_rad), 0.1f);
+}
+
+TEST(Roi, LandmarkRoiIsSquareInPixelsWhenSquareLongSet) {
+  // Landmark-path twin of RoiIsSquareInPixelsWhenSquareLongSet, which is
+  // palm-only. DefaultLandmarkRoiOptions sets square_long true and
+  // scale_x == scale_y, so after TransformRect's internal squaring and
+  // uniform scaling, h / w must equal aspect (i.e. the crop is square in
+  // pixels). The 12-point subset below spans x in [0.3, 0.7] and
+  // y in [0.45, 0.55] -- deliberately wide and flat, so squaring has real
+  // work to do rather than being a no-op.
+  std::array<Point2, 21> lm = ParkedLandmarks(Point2{0.5f, 0.5f});
+  lm[0] = Point2{0.5f, 0.55f};
+  lm[5] = Point2{0.5f, 0.45f};
+  lm[9] = Point2{0.5f, 0.45f};
+  lm[13] = Point2{0.5f, 0.45f};
+  lm[1] = Point2{0.3f, 0.45f};
+  lm[2] = Point2{0.7f, 0.45f};
+  lm[3] = Point2{0.3f, 0.55f};
+  lm[6] = Point2{0.7f, 0.55f};
+  lm[10] = Point2{0.4f, 0.5f};
+  lm[14] = Point2{0.6f, 0.5f};
+  lm[17] = Point2{0.45f, 0.5f};
+  lm[18] = Point2{0.55f, 0.5f};
+
+  const LandmarkRoiOptions o = DefaultLandmarkRoiOptions();
+  const float aspect = 16.0f / 9.0f;
+  const RotatedRect roi = RoiFromLandmarks(lm, aspect, o);
+  EXPECT_NEAR(roi.h / roi.w, aspect, 1e-4f);
 }
