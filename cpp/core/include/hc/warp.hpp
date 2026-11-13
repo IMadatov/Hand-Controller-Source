@@ -5,8 +5,8 @@
 
 namespace hc {
 
-// Options controlling how WarpToTensorNchw samples and scales pixel values
-// into the destination tensor.
+// Options controlling how the WarpToTensor* functions sample and scale pixel
+// values into the destination tensor.
 struct WarpOptions {
   int side;
   float scale = 1.0f / 255.0f;
@@ -33,8 +33,22 @@ struct WarpOptions {
 void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
                       const WarpOptions& o, float* dst);
 
+// Identical to WarpToTensorNchw in every respect -- same sampling, same
+// BORDER_ZERO semantics, same scale/bias, same channel-order selection --
+// except that `dst` is laid out interleaved HWC (row, column, channel)
+// instead of planar CHW. Still `3 * o.side * o.side` floats.
+//
+// This exists because both ONNX models in this project take NHWC input
+// ([1,192,192,3] palm, [1,224,224,3] landmark, per cpp/docs/models.md).
+// Writing NHWC directly avoids a separate transpose pass over the tensor on
+// the per-hand, per-frame path; the two functions share one sampler, so the
+// only difference between them is the destination index.
+void WarpToTensorNhwc(const ImageView& src, const RotatedRect& roi,
+                      const WarpOptions& o, float* dst);
+
 // Maps a point in the crop's own normalized 0..1 space (as produced by the
-// same rotated sampling WarpToTensorNchw performs) back to frame-normalized
+// same rotated sampling the WarpToTensor* functions perform) back to
+// frame-normalized
 // coordinates. `aspect` is frame width / frame height, the same convention
 // used throughout hc/geometry.hpp.
 Point2 CropToFrame(const RotatedRect& roi, float aspect, Point2 p_crop);

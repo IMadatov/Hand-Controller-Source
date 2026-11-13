@@ -513,6 +513,59 @@ in are: origin index `0`, and
   this fixture was sigmoid 0.907 (see above), well above the 0.5 threshold,
   and drops to 0.025 on an all-black frame of the same size.
 
+## Task 8 end-to-end confirmation
+
+Task 8 (`cpp/core/src/hand_tracker_onnx.cpp`, tests in
+`cpp/tests/test_hand_tracker.cpp`) is the first time these constants run
+together inside the real pipeline rather than in isolation. What that
+confirms, and what it explicitly does NOT:
+
+**Confirmed by a passing end-to-end test.**
+
+- **Anchor count and ordering.** `GenerateAnchors(PalmAnchorOptions())` is
+  checked at tracker construction against the palm model's own output shape:
+  the constructor throws unless output 0 is `[1, anchors.size(), 18]`. 2016 is
+  therefore enforced at runtime, not just documented. Row-for-row alignment
+  between anchors and output rows is confirmed indirectly but strongly: a
+  misordered grid decodes boxes at the wrong image positions, and the
+  resulting ROI would not produce a hand the landmark model recognises.
+- **The whole coordinate chain.** Letterbox square -> 192x192 detector input
+  -> `DecodePalmDetections` -> `CropToFrame` back to frame space ->
+  `RoiFromPalm` -> 224x224 landmark input -> `CropToFrame` back to frame
+  space. On the committed fixture this yields 21 landmarks that all lie
+  inside `[0,1]x[0,1]` and are anatomically coherent (wrist low-left, thumb
+  chain up-left, finger MCPs fanning right), and presence `0.9856`.
+- **The ROI transform constants** (palm `scale 2.6 / shift_y -0.5`; landmark
+  `scale 2.0 / shift_y -0.1`, origin 0, rotation weights 0.25/0.5/0.25 on
+  landmarks 5/9/13, 12-point bbox subset). The track survives five
+  consecutive frames on the landmark-derived ROI alone, with the palm
+  detector invoked exactly once. A materially wrong ROI constant would drift
+  the crop off the hand and drop presence below 0.5.
+- **The letterbox (not stretch) requirement.** Confirmed structurally rather
+  than by score: `LetterboxMatchesPaddedSquareInput` feeds the tracker the
+  640x480 fixture and a 640x640 black-padded copy of it, and requires the
+  landmarks to agree within 6 px in absolute pixel terms. They do. Replacing
+  the letterbox with a stretch moves them by ~50 px and fails the test.
+- **Landmark output units.** Output 0's x/y really are PIXELS in the 224x224
+  input space. Omitting the `/224` puts landmarks at `-13.1` and `318.2` in
+  frame-normalized space, i.e. off by exactly the input side.
+- **Presence is already a probability** (no external sigmoid). `0.9856`
+  observed through the real ROI crop, versus `0.744082` from Task 1's
+  whole-image stretch -- consistent with a better-framed input, and inside
+  `[0,1]` either way. A second sigmoid would have mapped it to `0.728`.
+
+**NOT confirmed by Task 8 -- markers deliberately left in place.**
+
+- **Handedness label order remains NOT DETERMINED** (see "Thresholds" above
+  and gap 3 below). Task 8 observes `0.6330` on the fixture and assigns a
+  side from the 0.5 split, but the Left/Right mapping is an arbitrary
+  placeholder in `hand_tracker_onnx.cpp` and the test asserts only
+  `handedness != Unknown`, never which side. Nothing in this task reads
+  `handedness.txt`, so nothing in this task could confirm it. Tasks 9/10 own
+  this.
+- Gaps 1 (TFLite provenance) and 5 (Windows ONNX Runtime) are untouched by
+  Task 8 and remain exactly as stated below.
+
 ## What was NOT verified (explicit gaps)
 
 1. **Original TFLite models were not re-inspected.** There is no TFLite

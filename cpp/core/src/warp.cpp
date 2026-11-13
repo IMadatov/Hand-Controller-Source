@@ -77,10 +77,16 @@ inline float BlendChannel(const BilinearTaps& t, int channel) {
   return top * t.wy0 + bottom * t.wy1;
 }
 
-}  // namespace
+// Destination layout selector for WarpSample below. The two public entry
+// points differ ONLY in how they turn (pixel index, channel slot) into a
+// destination offset, so the sampling loop is written once and the layout is
+// resolved at compile time via `if constexpr` -- no branch in the inner loop,
+// and no chance of the two layouts drifting apart.
+enum class TensorLayout { kNchw, kNhwc };
 
-void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
-                      const WarpOptions& o, float* dst) {
+template <TensorLayout kLayout>
+void WarpImpl(const ImageView& src, const RotatedRect& roi,
+              const WarpOptions& o, float* dst) {
   const int side = o.side;
   const float W = static_cast<float>(src.width);
   const float H = static_cast<float>(src.height);
@@ -98,12 +104,22 @@ void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
   const int src_g = 1;
   const int src_b = (src.format == PixelFormat::Rgb8) ? 2 : 0;
 
-  // Destination plane order depends on o.output_rgb.
-  const int plane_for_r = o.output_rgb ? 0 : 2;
-  const int plane_for_g = 1;
-  const int plane_for_b = o.output_rgb ? 2 : 0;
+  // Destination channel slot order depends on o.output_rgb. For NCHW a slot
+  // is a plane index; for NHWC it is the offset within each pixel's triple.
+  const int slot_for_r = o.output_rgb ? 0 : 2;
+  const int slot_for_g = 1;
+  const int slot_for_b = o.output_rgb ? 2 : 0;
 
   const int plane_size = side * side;
+
+  // Destination offset for channel slot `slot` of output pixel `idx`.
+  auto DstIndex = [plane_size](int slot, int idx) {
+    if constexpr (kLayout == TensorLayout::kNchw) {
+      return slot * plane_size + idx;
+    } else {
+      return idx * 3 + slot;
+    }
+  };
 
   for (int oy = 0; oy < side; ++oy) {
     // Crop-space normalized coordinate of this output row's center.
@@ -134,11 +150,23 @@ void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
       const float b = BlendChannel(taps, src_b);
 
       const int idx = oy * side + ox;
-      dst[plane_for_r * plane_size + idx] = r * o.scale + o.bias;
-      dst[plane_for_g * plane_size + idx] = g * o.scale + o.bias;
-      dst[plane_for_b * plane_size + idx] = b * o.scale + o.bias;
+      dst[DstIndex(slot_for_r, idx)] = r * o.scale + o.bias;
+      dst[DstIndex(slot_for_g, idx)] = g * o.scale + o.bias;
+      dst[DstIndex(slot_for_b, idx)] = b * o.scale + o.bias;
     }
   }
+}
+
+}  // namespace
+
+void WarpToTensorNchw(const ImageView& src, const RotatedRect& roi,
+                      const WarpOptions& o, float* dst) {
+  WarpImpl<TensorLayout::kNchw>(src, roi, o, dst);
+}
+
+void WarpToTensorNhwc(const ImageView& src, const RotatedRect& roi,
+                      const WarpOptions& o, float* dst) {
+  WarpImpl<TensorLayout::kNhwc>(src, roi, o, dst);
 }
 
 Point2 CropToFrame(const RotatedRect& roi, float aspect, Point2 p_crop) {

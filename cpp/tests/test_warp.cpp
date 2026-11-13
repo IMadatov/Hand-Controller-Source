@@ -362,3 +362,53 @@ TEST(Warp, AppliesScaleAndBias) {
   // bias itself, not to zero.
   EXPECT_FLOAT_EQ(dst[2 * plane + probe], -1.0f);
 }
+
+TEST(Warp, NhwcIsAPermutationOfNchw) {
+  // Ruling T8-F: WarpToTensorNhwc exists only so the ONNX path (both models
+  // take NHWC input) avoids a transpose pass. The two writers share one
+  // sampler, so the only thing that can differ is the destination index --
+  // which is exactly what this pins. A rotated, non-square, partly
+  // out-of-frame ROI and Bgr8 input exercise the interesting branches.
+  constexpr int kW = 11;
+  constexpr int kH = 7;
+  constexpr int kStride = kW * 3 + 5;  // padded rows
+  constexpr int kSide = 9;
+  const std::vector<std::uint8_t> buf =
+      MakeBuffer(kW, kH, kStride, PixelFormat::Bgr8);
+  const ImageView src{buf.data(), kW, kH, kStride, PixelFormat::Bgr8};
+
+  const RotatedRect roi{{0.6f, 0.45f}, 1.4f, 0.8f, 0.37f * kPi};
+  WarpOptions opts;
+  opts.side = kSide;
+  opts.scale = 1.0f / 255.0f;
+  opts.bias = 0.125f;
+  opts.output_rgb = true;
+
+  std::vector<float> nchw(3 * kSide * kSide, 0.0f);
+  std::vector<float> nhwc(3 * kSide * kSide, 0.0f);
+  hc::WarpToTensorNchw(src, roi, opts, nchw.data());
+  hc::WarpToTensorNhwc(src, roi, opts, nhwc.data());
+
+  const int plane = kSide * kSide;
+  for (int y = 0; y < kSide; ++y) {
+    for (int x = 0; x < kSide; ++x) {
+      const int idx = y * kSide + x;
+      for (int c = 0; c < 3; ++c) {
+        EXPECT_FLOAT_EQ(nhwc[idx * 3 + c], nchw[c * plane + idx])
+            << "x=" << x << " y=" << y << " c=" << c;
+      }
+    }
+  }
+
+  // Guards the degenerate "both are all-bias" pass: the sampled content must
+  // actually vary, or the permutation check above is vacuous.
+  const float first = nhwc[0];
+  bool varies = false;
+  for (float v : nhwc) {
+    if (v != first) {
+      varies = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(varies);
+}
