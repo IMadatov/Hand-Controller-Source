@@ -87,6 +87,45 @@ PalmDetection PalmToFrameSpace(const PalmDetection& d, const RotatedRect& square
 // want, but they are set explicitly at every call site so that a future
 // change to the defaults cannot silently move the models' input range or
 // channel order. [0,1] range and RGB order are both pinned in models.md.
+// Wraps an axis-aligned Rect as a RotatedRect with zero rotation, so that
+// AxisAlignedBounds() returns it back unchanged.
+RotatedRect Unrotated(const Rect& r) {
+  return RotatedRect{Point2{r.x + r.w * 0.5f, r.y + r.h * 0.5f}, r.w, r.h,
+                     0.0f};
+}
+
+// The rect used to decide "is this detection the hand this slot is already
+// tracking", derived from the slot's current landmarks.
+//
+// MEASURED, and the reason this is NOT simply the slot's crop ROI. The
+// association layer compares AxisAlignedBounds(slot.roi) against the palm
+// detector's box, so the two must be commensurable extents. The crop ROI is
+// not: LandmarkRoiOptions scales by 2.0 and squares on the long side, which
+// on the committed fixture inflates it to ~13x the area of the palm box it
+// would be compared against (0.206 -> 2.06 vs the box's 0.152). IoU is
+// bounded above by the area ratio, so the TRUE pair measured 0.074 -- below
+// the 0.3 association threshold, i.e. a correct match was structurally
+// impossible and every re-detection stacked a second slot onto a hand that
+// was already tracked.
+//
+// Using the tight bounding box of the same 12-point landmark subset
+// MediaPipe's ROI calculator uses (fingertips excluded) makes the comparison
+// like-for-like. Measured on the two-hand composite: 0.557 / 0.597 for the
+// true pairs and 0.000 / 0.000 for the false pairs -- a clean separation
+// either side of 0.3. (Comparing inflated ROI to inflated ROI also clears the
+// threshold, but at 0.887 true vs 0.239 false it leaves only 0.06 of margin
+// on the false side, because two 2.6x-scaled ROIs overlap heavily even for
+// different hands. The tight boxes are the safer signal.)
+Rect TightLandmarkBox(const std::array<Point2, kNumLandmarks>& lm,
+                      const LandmarkRoiOptions& o) {
+  std::array<Point2, kMaxBboxIndices> subset{};
+  for (int i = 0; i < o.bbox_index_count; ++i) {
+    subset[static_cast<std::size_t>(i)] =
+        lm[static_cast<std::size_t>(o.bbox_indices[static_cast<std::size_t>(i)])];
+  }
+  return BoundingBox(subset.data(), static_cast<std::size_t>(o.bbox_index_count));
+}
+
 WarpOptions ModelWarpOptions(int side) {
   WarpOptions o;
   o.side = side;
@@ -121,27 +160,44 @@ class HandTrackerOnnx::Impl {
         anchors_(GenerateAnchors(PalmAnchorOptions())),
         palm_roi_opts_(DefaultPalmRoiOptions()),
         landmark_roi_opts_(DefaultLandmarkRoiOptions()) {
-    // Task 8 scope is ONE hand. Rejecting max_hands > 1 outright, rather than
-    // accepting it and quietly returning a single observation, so that Task
-    // 10 (two-hand association) must consciously lift this guard instead of
-    // discovering by experiment that the field was inert. HandTrackerConfig's
-    // own default is 2 -- forward-looking, per the phase-1 brief -- so today
-    // a caller must pass 1 explicitly.
-    if (config.max_hands > 1) {
-      throw std::invalid_argument(
-          "HandTrackerOnnx: max_hands > 1 is not implemented in this phase "
-          "(single-hand tracking only; multi-hand association is Task 10). "
-          "Pass max_hands = 1.");
-    }
+    // Task 8's guard ("max_hands > 1 is not implemented") is DELIBERATELY
+    // GONE: Task 10 is the task that was required to lift it consciously.
+    // max_hands is now honoured for real, one TrackSlot per hand.
     if (config.max_hands < 1) {
       throw std::invalid_argument("HandTrackerOnnx: max_hands must be >= 1");
     }
+    // The upper bound is not arbitrary and not a policy choice: it is derived
+    // from the association layer. AssignDetectionsToSlots considers only the
+    // first kMaxAssociationEntries slots AND the first kMaxAssociationEntries
+    // detections, silently ignoring the rest. Since max_results below asks
+    // the decoder for up to 2*max_hands - 1 detections, keeping
+    // 2*max_hands - 1 <= kMaxAssociationEntries is what guarantees no slot
+    // and no detection is ever dropped unseen. Rejecting loudly beats
+    // misassociating quietly.
+    if (static_cast<std::size_t>(2 * config.max_hands - 1) >
+        kMaxAssociationEntries) {
+      throw std::invalid_argument(
+          "HandTrackerOnnx: max_hands exceeds what the association layer can "
+          "handle (2*max_hands-1 must be <= " +
+          std::to_string(kMaxAssociationEntries) + ")");
+    }
+
+    slots_.assign(static_cast<std::size_t>(config.max_hands), Slot{});
+    assoc_slots_.reserve(slots_.size());
 
     palm_decode_opts_ = PalmDecodeDefaults();
-    // The decoder caps at one result because this phase consumes one hand;
-    // that keeps NMS from doing work whose result is discarded. Tasks 9/10
-    // raise it to config_.max_hands once association exists.
-    palm_decode_opts_.max_results = 1;
+    // How many detections the decoder is asked for, and why it is NOT just
+    // max_hands. The detector runs over the whole frame, so it re-finds the
+    // hands that are ALREADY tracked; those detections are matched to their
+    // live slots and discarded, and only the leftovers can fill free slots.
+    // In the worst case max_hands - 1 slots are live and each consumes one
+    // detection, while max_hands - (max_hands - 1) = 1 slot still needs
+    // filling, and the free slot's hand may rank below all of them. Asking
+    // for max_hands would therefore let a frame end with a free slot and an
+    // untracked hand in view. 2*max_hands - 1 is the smallest cap that cannot
+    // starve a free slot this way; it is a tracking-policy number, not a model
+    // parameter (models.md records no max_num_detections).
+    palm_decode_opts_.max_results = 2 * config.max_hands - 1;
 
     // The palm input size is PINNED at 192, not adapted to whatever model is
     // loaded. Adapting is not actually achievable: the decode scales
@@ -183,15 +239,30 @@ class HandTrackerOnnx::Impl {
     const float aspect =
         static_cast<float>(frame.width) / static_cast<float>(frame.height);
 
-    if (!tracking_) {
-      if (!DetectPalmAndSeedRoi(frame, aspect)) return;
-    }
+    // ORDER MATTERS, and it is Task 8's order, generalized: the decision to
+    // run the detector is made from the slot state at frame ENTRY, before any
+    // landmark model runs. So a slot that dies to low presence during THIS
+    // frame re-triggers detection on the NEXT frame, not on this one
+    // (ruling T10-F; HandTracker.ReDetectsAfterHandDisappears pins the same
+    // ordering for the single-hand case).
+    //
+    // Ruling T10-D, a performance fact the measurement task needs: this fires
+    // the palm detector on EVERY frame for as long as any slot is empty. A
+    // scene with one hand visible and max_hands = 2 therefore pays for palm
+    // detection every single frame, indefinitely. That matches MediaPipe and
+    // is deliberate in phase 1 -- there is no throttle here -- but it means a
+    // mean "PalmDetect stage time" is a misleading summary. Task 14 must
+    // report PalmDetect CALLS PER FRAME alongside it.
+    if (AnySlotInactive()) DetectAndFillFreeSlots(frame, aspect);
 
-    RunLandmarks(frame, aspect, timestamp_us, out);
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+      if (!slots_[i].t.active) continue;
+      RunLandmarksForSlot(i, frame, aspect, timestamp_us, out);
+    }
   }
 
   void Reset() {
-    tracking_ = false;
+    for (Slot& s : slots_) s = Slot{};
   }
 
  private:
@@ -220,8 +291,33 @@ class HandTrackerOnnx::Impl {
     }
   }
 
-  // Returns true if a hand was found and roi_ was seeded.
-  bool DetectPalmAndSeedRoi(const ImageView& frame, float aspect) {
+  bool AnySlotInactive() const {
+    for (const Slot& s : slots_) {
+      if (!s.t.active) return true;
+    }
+    return false;
+  }
+
+  // Index of the first inactive slot, or -1 if every slot is taken. Returning
+  // -1 is exactly the max_hands cap: once all slots are live, any remaining
+  // unmatched detection is dropped.
+  int FirstFreeSlot() const {
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+      if (!slots_[i].t.active) return static_cast<int>(i);
+    }
+    return -1;
+  }
+
+  // Runs the palm detector ONCE over the whole frame and seeds every free
+  // slot from the detections that do not already belong to a live slot.
+  //
+  // Ruling T10-C: "once over the whole frame" is the literal behaviour. This
+  // is not scoped to the region where a hand went missing and it is not run
+  // once per free slot -- the detector has no notion of which hand is
+  // missing. Rejecting the hands we are already tracking is done afterwards,
+  // by the association layer, which is the only part of the pipeline that
+  // knows where the live slots are.
+  void DetectAndFillFreeSlots(const ImageView& frame, float aspect) {
     // Ruling T8-B: letterbox, not stretch. A full-frame rect squared on its
     // long side makes the short axis overhang the frame; the warp zero-fills
     // those samples (BORDER_ZERO), and 0 is inside the model's [0,1] input
@@ -257,25 +353,81 @@ class HandTrackerOnnx::Impl {
                                         anchors_, palm_decode_opts_);
     }
 
-    if (detections.empty()) return false;
+    if (detections.empty()) return;
 
-    const PalmDetection framed =
-        PalmToFrameSpace(detections[0], square, aspect);
-    roi_ = RoiFromPalm(framed, aspect, palm_roi_opts_);
-    // Ruling T9-C: track ids now come from the process-global, atomic
-    // NextTrackId() (association.hpp) instead of an instance-local counter,
-    // so single-hand and future multi-hand tracks never collide on id.
-    track_id_ = NextTrackId();
-    tracking_ = true;
-    return true;
+    // Association runs entirely in FRAME-normalized space (association.hpp,
+    // ruling T9-A); DecodePalmDetections reports the detector's 192x192
+    // input-square space. Mapping first is mandatory, not cosmetic: on this
+    // path the frame is never square, so feeding detector-space boxes to
+    // AssignDetectionsToSlots would misassociate silently.
+    framed_.clear();
+    for (const PalmDetection& d : detections) {
+      framed_.push_back(PalmToFrameSpace(d, square, aspect));
+    }
+
+    // The association layer takes a flat std::vector<TrackSlot>, so mirror
+    // the slots' association halves into one. Rebuilt from slots_ on every
+    // detect frame rather than kept in sync incrementally: there is exactly
+    // one place the mirror can be wrong, and it is this loop.
+    assoc_slots_.clear();
+    for (const Slot& s : slots_) assoc_slots_.push_back(s.t);
+
+    std::vector<int> assignment;
+    {
+      ScopedStage s(metrics_, Stage::Associate);
+      // The REAL frame aspect, never a hardcoded constant (association.hpp).
+      //
+      // HONEST NOTE, so nobody "proves" this argument is dead: replacing
+      // `aspect` with 1.0f here leaves the entire suite green, and that is a
+      // mathematical identity rather than a gap in the tests. Every rect we
+      // put in assoc_slots_ carries rotation 0, and AxisAlignedBounds scales
+      // the x half-extent by `aspect` and then divides it back out again, so
+      // for an unrotated rect the parameter cancels exactly. It stops
+      // cancelling the moment a rotated rect is passed -- which is precisely
+      // what a future change to the association rect would do -- and these
+      // frames are 2.67:1, nowhere near square. Pass the real value.
+      assignment = AssignDetectionsToSlots(assoc_slots_, framed_, aspect,
+                                           kDefaultAssociationIou);
+    }
+
+    for (std::size_t i = 0; i < assignment.size(); ++i) {
+      // Matched to a slot that is already tracking this hand: DISCARD. Using
+      // it would stack a second slot onto a hand we already have, and the
+      // genuinely untracked hand would never get a slot.
+      if (assignment[i] >= 0) continue;
+
+      const int free_slot = FirstFreeSlot();
+      if (free_slot < 0) break;  // max_hands reached.
+
+      Slot& slot = slots_[static_cast<std::size_t>(free_slot)];
+      slot.crop_roi = RoiFromPalm(framed_[i], aspect, palm_roi_opts_);
+      // Seed the association rect from the detection box, which is already
+      // the right KIND of rect (tight and axis-aligned) to compare against
+      // future detections. This is belt-and-braces rather than load-bearing
+      // today: the landmark pass further down this same frame overwrites it
+      // with the tight landmark box, and if that pass instead deactivates the
+      // slot the value is never read. It exists so a slot is never
+      // simultaneously `active` and carrying a stale or zero rect, which is
+      // what the association layer would silently match against if the order
+      // of the two passes ever changed.
+      slot.t.roi = Unrotated(framed_[i].box);
+      // Ruling T9-C: track ids come from the process-global, atomic
+      // NextTrackId() (association.hpp), so tracks from different slots and
+      // different tracker instances never collide on id.
+      slot.t.id = NextTrackId();
+      slot.t.handedness = Handedness::Unknown;
+      slot.t.misses = 0;
+      slot.t.active = true;
+    }
   }
 
-  void RunLandmarks(const ImageView& frame, float aspect,
-                    std::int64_t timestamp_us,
-                    std::vector<HandObservation>& out) {
+  void RunLandmarksForSlot(std::size_t slot_index, const ImageView& frame,
+                           float aspect, std::int64_t timestamp_us,
+                           std::vector<HandObservation>& out) {
+    Slot& slot = slots_[slot_index];
     {
       ScopedStage s(metrics_, Stage::Preprocess);
-      WarpToTensorNhwc(frame, roi_, ModelWarpOptions(landmark_side_),
+      WarpToTensorNhwc(frame, slot.crop_roi, ModelWarpOptions(landmark_side_),
                        landmark_input_.data());
     }
 
@@ -314,19 +466,21 @@ class HandTrackerOnnx::Impl {
         const Point2 in_crop{raw[i * 3 + 0] * inv_side,
                              raw[i * 3 + 1] * inv_side};
         landmarks[static_cast<std::size_t>(i)] =
-            CropToFrame(roi_, aspect, in_crop);
+            CropToFrame(slot.crop_roi, aspect, in_crop);
       }
     }
 
     if (presence < config_.min_presence) {
-      // The hand is gone (or the ROI drifted off it). Drop the track so the
-      // next frame goes back through the detector.
-      tracking_ = false;
+      // THIS hand is gone (or this slot's ROI drifted off it). Only this
+      // slot is dropped -- the other slots' tracks are independent and must
+      // survive. The freed slot makes the next frame run the detector again.
+      slot.t.active = false;
+      ++slot.t.misses;
       return;
     }
 
     HandObservation obs{};
-    obs.track_id = track_id_;
+    obs.track_id = slot.t.id;
     // Ruling T8-E: which side of the 0.5 split means Left and which means
     // Right is NOT DETERMINED -- MediaPipe's handedness.txt label map has not
     // been fetched, and the convention additionally flips under input
@@ -336,6 +490,7 @@ class HandTrackerOnnx::Impl {
     // Tasks 9/10 resolve the label map.
     obs.handedness =
         (handedness_score >= 0.5f) ? Handedness::Right : Handedness::Left;
+    slot.t.handedness = obs.handedness;
     // Confidence in the chosen class, i.e. the distance of the binary score
     // from the 0.5 split, expressed as a probability in [0.5, 1].
     obs.handedness_score = (handedness_score >= 0.5f) ? handedness_score
@@ -345,9 +500,13 @@ class HandTrackerOnnx::Impl {
     obs.timestamp_us = timestamp_us;
     out.push_back(obs);
 
-    // Seed the next frame's ROI from these landmarks, which is what lets the
-    // detector be skipped entirely while the track holds.
-    roi_ = RoiFromLandmarks(landmarks, aspect, landmark_roi_opts_);
+    // Seed THIS slot's next-frame crop ROI from its own landmarks, which is
+    // what lets the detector be skipped entirely while every slot holds, and
+    // refresh the (tight, differently-shaped) rect the association layer
+    // compares against palm boxes. See TightLandmarkBox for why these two are
+    // not the same rectangle.
+    slot.crop_roi = RoiFromLandmarks(landmarks, aspect, landmark_roi_opts_);
+    slot.t.roi = Unrotated(TightLandmarkBox(landmarks, landmark_roi_opts_));
   }
 
   HandTrackerConfig config_;
@@ -376,10 +535,26 @@ class HandTrackerOnnx::Impl {
   std::vector<int64_t> palm_input_shape_;
   std::vector<int64_t> landmark_input_shape_;
 
-  // Tracking state.
-  bool tracking_ = false;
-  RotatedRect roi_{};
-  std::uint32_t track_id_ = 0;
+  // One slot per tracked hand. The two rectangles are deliberately distinct
+  // and must not be collapsed into one:
+  //   - `t.roi` (the TrackSlot the association layer sees) is a TIGHT,
+  //     unrotated extent, commensurable with a palm detection box.
+  //   - `crop_roi` is MediaPipe's inflated, rotated ROI, which is what the
+  //     landmark model is actually cropped from.
+  // See TightLandmarkBox for the measurements behind the split.
+  struct Slot {
+    TrackSlot t{};
+    RotatedRect crop_roi{};
+  };
+
+  // Tracking state: exactly one slot per hand, sized once from
+  // config.max_hands and never resized, so the cap is structural rather than
+  // a comparison someone can forget.
+  std::vector<Slot> slots_;
+  // Scratch buffers, members so the detection path allocates nothing after
+  // the first frame.
+  std::vector<PalmDetection> framed_;
+  std::vector<TrackSlot> assoc_slots_;
 };
 
 HandTrackerOnnx::HandTrackerOnnx(const HandTrackerConfig& config,

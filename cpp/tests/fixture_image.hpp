@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -86,6 +87,97 @@ inline OwnedImage SolidImage(int w, int h, std::uint8_t gray) {
   img.view.stride = w * 3;
   img.view.format = hc::PixelFormat::Rgb8;
   return img;
+}
+
+// Returns a horizontally mirrored copy of `src` (column x becomes column
+// width-1-x). Used by the two-hand tests to manufacture a second hand that is
+// the opposite handedness of the first: MediaPipe's handedness output is
+// defined against the input image's own orientation, so mirroring the pixels
+// must flip the reported side. See cpp/docs/models.md, "Handedness label
+// order".
+inline OwnedImage MirrorX(const OwnedImage& src) {
+  OwnedImage out;
+  const int w = src.view.width;
+  const int h = src.view.height;
+  out.pixels.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
+                    3u);
+  for (int y = 0; y < h; ++y) {
+    const std::uint8_t* s =
+        src.view.data + static_cast<std::size_t>(y) * src.view.stride;
+    std::uint8_t* d =
+        out.pixels.data() + static_cast<std::size_t>(y) * w * 3u;
+    for (int x = 0; x < w; ++x) {
+      const std::uint8_t* sp = s + static_cast<std::size_t>(w - 1 - x) * 3u;
+      std::uint8_t* dp = d + static_cast<std::size_t>(x) * 3u;
+      dp[0] = sp[0];
+      dp[1] = sp[1];
+      dp[2] = sp[2];
+    }
+  }
+  out.view.data = out.pixels.data();
+  out.view.width = w;
+  out.view.height = h;
+  out.view.stride = w * 3;
+  out.view.format = src.view.format;
+  return out;
+}
+
+// Composites `a` and `b` into one image of width a.w + b.w, with `a` on the
+// left. Both inputs must have the same height and the same pixel format.
+//
+// WARNING (ruling T10-A): this makes the frame WIDER, and the palm detector
+// letterboxes the whole frame into a square, so a side-by-side pair of 4:3
+// fixtures is letterboxed into a square whose side is the COMBINED width.
+// Every hand in it therefore lands roughly half as large in the detector's
+// 192x192 input as the same hand does in a single-fixture frame, which pushes
+// it toward the small end of the SSD anchor grid. Do not compensate by
+// lowering the detector's min_score -- that is a model parameter pinned in
+// cpp/docs/models.md -- and do not special-case the tracker. Compensate with
+// the composite's own geometry, which is the test's free choice.
+//
+// MEASURED, so this stays a caveat rather than a blocker (cpp/docs/models.md,
+// "Palm scores on multi-hand composites"): on the committed fixture the
+// shrink is survivable and no compensation was needed. Sigmoid scores are
+// 0.9364 for a lone hand, 0.8932 / 0.8799 for a side-by-side pair, and
+// 0.8784 / 0.8784 / 0.8185 for three -- all clear the 0.5 gate with margin.
+inline OwnedImage SideBySide(const OwnedImage& a, const OwnedImage& b) {
+  if (a.view.height != b.view.height) {
+    throw std::runtime_error("SideBySide: inputs must have equal height");
+  }
+  if (a.view.format != b.view.format) {
+    throw std::runtime_error("SideBySide: inputs must have the same format");
+  }
+  const int h = a.view.height;
+  const int w = a.view.width + b.view.width;
+
+  OwnedImage out;
+  out.pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
+                        3u,
+                    0);
+  const int stride = w * 3;
+  for (int y = 0; y < h; ++y) {
+    std::uint8_t* d =
+        out.pixels.data() + static_cast<std::size_t>(y) * stride;
+    std::memcpy(d, a.view.data + static_cast<std::size_t>(y) * a.view.stride,
+                static_cast<std::size_t>(a.view.width) * 3u);
+    std::memcpy(d + static_cast<std::size_t>(a.view.width) * 3u,
+                b.view.data + static_cast<std::size_t>(y) * b.view.stride,
+                static_cast<std::size_t>(b.view.width) * 3u);
+  }
+  out.view.data = out.pixels.data();
+  out.view.width = w;
+  out.view.height = h;
+  out.view.stride = stride;
+  out.view.format = a.view.format;
+  return out;
+}
+
+// A black image the same size and format as `like`. Used to blank one half of
+// a composite so a hand disappears without changing the frame's geometry --
+// changing the geometry would change the letterbox, and so would change the
+// surviving hand's scale in the detector input too.
+inline OwnedImage BlackLike(const OwnedImage& like) {
+  return SolidImage(like.view.width, like.view.height, 0);
 }
 
 // Model paths come from compile definitions CMake fills in from

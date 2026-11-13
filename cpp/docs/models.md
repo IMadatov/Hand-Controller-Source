@@ -319,10 +319,54 @@ distinction between the two models matters.
 - **Handedness label order: NOT DETERMINED.** Which side of that split means
   "Left" and which means "Right" is set by
   `label_map_path: "mediapipe/modules/hand_landmark/handedness.txt"`, a file
-  this task did not fetch. Task 9/10 must read that label map rather than
-  guessing; also note MediaPipe's own docs warn handedness assumes a
-  mirrored (selfie-view) input image, so the convention flips with input
-  mirroring. Recorded as a gap, not an assumption.
+  no task so far has fetched. Task 10 ran the mirror experiment described
+  under "Handedness mirror experiment" below, which pins the *flip* but
+  cannot pin the absolute side; the marker therefore stays. Also note
+  MediaPipe's own docs warn handedness assumes a mirrored (selfie-view)
+  input image, so the convention flips with input mirroring. Recorded as a
+  gap, not an assumption.
+
+### Handedness mirror experiment — OBSERVED (Task 10, ruling T10-B)
+
+Mirroring the input horizontally must flip the reported handedness, and that
+is testable without any ground truth about which hand the fixture shows. Run
+through the real tracker (ROI crop and all), the raw `Identity_2` scalar is:
+
+| Input | Frame | raw `Identity_2` | Label from the 0.5 split |
+|---|---|---|---|
+| committed fixture | 640x480 | **0.367026** | Left |
+| `MirrorX(fixture)` | 640x480 | **0.686721** | Right |
+| `SideBySide(f, MirrorX(f))`, left hand | 1280x480 | 0.424693 | Left |
+| `SideBySide(f, MirrorX(f))`, right hand | 1280x480 | 0.600345 | Right |
+| `SideBySide(MirrorX(f), f)`, left hand | 1280x480 | 0.650468 | Right |
+| `SideBySide(MirrorX(f), f)`, right hand | 1280x480 | 0.527199 | **Right** |
+
+All values are deterministic across repeated runs (byte-identical output).
+
+**What this establishes:** on the isolated fixture the flip is real and
+comfortably resolved — 0.367 and 0.687 sit symmetrically either side of 0.5
+and swap labels under `MirrorX`.
+
+**What this refutes:** that the flip is *reliable*. In the last row the
+unmirrored fixture, placed in the right half of a composite, reports
+**0.527 — "Right"**, the same label its own mirror gets, and the opposite of
+the "Left" it reports in isolation. Nothing about the hand changed; only its
+position in the frame, and therefore its ROI crop, did. So the handedness
+scalar is a function of the crop, not of the hand alone, and in composites it
+collapses toward 0.5 where a few hundredths decide the label. This is direct
+empirical support for `association.hpp`'s refusal to use handedness as an
+association signal.
+
+**Consequence for tests:** no test asserts a side, and no test asserts the
+flip either — the flip does not survive the composite frames the two-hand
+tests actually run on. `HandTrackerTwo.FindsTwoHandsInSideBySideFixture`
+asserts only `handedness != Handedness::Unknown`.
+
+**Still NOT DETERMINED:** absolute Left vs Right. Resolving it needs both
+`handedness.txt` AND ground truth about which hand the fixture shows, and the
+fixture is a photo of two *crossed* palms (Wikimedia title says "Left Hand",
+but two hands are visible and the detector selects one of them), so the
+fixture cannot supply that ground truth even if the label map were fetched.
 
 ### Live run against the fixture — OBSERVED, `validate_models` output
 
@@ -566,6 +610,73 @@ confirms, and what it explicitly does NOT:
 - Gaps 1 (TFLite provenance) and 5 (Windows ONNX Runtime) are untouched by
   Task 8 and remain exactly as stated below.
 
+## Task 10 multi-hand confirmation
+
+### Palm scores on multi-hand composites — OBSERVED (ruling T10-A)
+
+The palm detector letterboxes the WHOLE frame into its 192x192 input, so
+compositing hands side by side shrinks every hand in that input: a 1280x480
+pair letterboxes into a 1280x1280 square in which the hands occupy only the
+middle 480 rows. The concern was that this would push hands under the `0.5`
+`min_score_thresh` and make the two-hand tests fail for a reason that has
+nothing to do with tracking. Measured sigmoid scores, decoded with every
+model parameter at its pinned value:
+
+| Composite | Frame | Aspect | Detections >= 0.5 | Scores |
+|---|---|---|---|---|
+| fixture | 640x480 | 1.333 | 1 | 0.9364 |
+| `MirrorX(fixture)` | 640x480 | 1.333 | 1 | 0.9104 |
+| `SideBySide(f, MirrorX(f))` | 1280x480 | 2.667 | 2 | 0.8932, 0.8799 |
+| `SideBySide(f, black)` | 1280x480 | 2.667 | 1 | 0.9551 |
+| three-wide `SideBySide(SideBySide(f, MirrorX(f)), f)` | 1920x480 | 4.0 | 3 | 0.8784, 0.8784, 0.8185 |
+
+**Conclusion: the predicted failure does not occur.** Every hand in every
+composite clears 0.5 with at least 0.3 of margin, so no geometry change was
+needed and none was made; the brief's `SideBySide` composites are used as
+written. The degradation is real but mild (0.936 -> 0.893 at two hands,
+-> 0.818 at three), consistent with the hands staying inside the SSD anchor
+grid's scale range (`min_scale` 0.1484 to `max_scale` 0.75). `min_score` was
+never touched, and the tracker contains no composite-specific special case.
+
+### Association rects must be commensurable — OBSERVED
+
+Task 9's `MatchSlotForDetection` compares `AxisAlignedBounds(slot.roi)`
+against the palm detector's `d.box`. Feeding it the tracker's *crop* ROI does
+not work, and the failure is structural rather than marginal: the crop ROI is
+`LandmarkRoiOptions`-derived, i.e. scaled 2.0x and squared on its long side,
+which on this fixture makes it ~13x the area of the palm box
+(0.206 -> 2.0598 vs the box's 0.1518). IoU is bounded above by the area
+ratio, so measured IoU for the **correct** slot/detection pair was **0.074**,
+below the 0.3 association threshold — a correct match was impossible, and
+every re-detection stacked a second slot onto an already-tracked hand.
+
+Measured alternatives on `SideBySide(f, MirrorX(f))`:
+
+| Slot rect compared against `d.box` | True pair | False pair |
+|---|---|---|
+| crop ROI bounds (landmark ROI, scale 2.0) | 0.074 / 0.076 | 0.000 / 0.000 |
+| **tight 12-point landmark bbox** | **0.557 / 0.597** | **0.000 / 0.000** |
+| crop ROI vs `RoiFromPalm(det)` bounds (2.6) | 0.887 / 0.868 | 0.239 / 0.226 |
+
+`hand_tracker_onnx.cpp` therefore keeps two rectangles per slot: the inflated
+rotated `crop_roi` the landmark model is cropped from, and a tight unrotated
+rect (the bounding box of the same 12-landmark subset MediaPipe's ROI
+calculator uses) that is what the association layer sees. The third row also
+clears the threshold but leaves only 0.06 of margin on the false side,
+because two 2.6x-inflated ROIs overlap heavily even for different hands; the
+tight boxes separate cleanly in both directions and were chosen for that.
+
+### Detector duty cycle — OBSERVED (ruling T10-D, for Task 14)
+
+The palm detector runs whenever ANY slot is inactive. Measured call counts:
+two hands visible with `max_hands = 2` over 5 frames gives
+`PalmDetect.calls == 1` and `Landmark.calls == 10`. But one hand visible with
+`max_hands = 2` leaves a slot permanently empty, so the detector runs on
+**every frame, indefinitely**. This matches MediaPipe and is deliberate in
+phase 1 (no re-detection throttle). Task 14's measurement report must break
+out **PalmDetect calls per frame**, not only a mean stage time: the mean hides
+a 1x-vs-every-frame difference in how often the heavier of the two models runs.
+
 ## What was NOT verified (explicit gaps)
 
 1. **Original TFLite models were not re-inspected.** There is no TFLite
@@ -580,12 +691,17 @@ confirms, and what it explicitly does NOT:
    `rect_transformation_calculator.proto`; `optional float shift_x = 5;` has no
    explicit default, so proto2's implicit `0.0` applies. No longer a gap.
 3. **Handedness sign convention** (which way round "left" vs "right" maps) —
-   still NOT DETERMINED. `handedness.txt`, the label-map file named by
-   `TensorsToClassificationCalculatorOptions.label_map_path`, was not fetched,
-   so which label index corresponds to which hand is unconfirmed. The
-   *threshold* is determined (`0.5`, see item 4). Task 10 must resolve the
-   label order before trusting handedness, and note the Python
-   `solutions`-layer additionally flips handedness for mirrored input.
+   still NOT DETERMINED after Task 10. `handedness.txt`, the label-map file
+   named by `TensorsToClassificationCalculatorOptions.label_map_path`, was
+   still not fetched, so which label index corresponds to which hand is
+   unconfirmed. The *threshold* is determined (`0.5`, see item 4), and the
+   mirror *flip* is now measured (see "Handedness mirror experiment") — but
+   the experiment also showed the flip is not robust once the hand's position
+   in the frame changes, and the fixture (two crossed palms) cannot supply
+   ground truth for the absolute side regardless. Resolving this needs a
+   single-hand fixture of known side PLUS the label map. Nothing in the code
+   depends on the absolute side today: `hand_tracker_onnx.cpp`'s assignment
+   is still an explicitly-marked placeholder, and no test asserts a side.
 4. ~~**Whether presence/handedness are pre- or post-sigmoid**~~ — **RESOLVED**
    in this revision, for both models, from source rather than from value ranges:
    - *Landmark model = **post**-sigmoid (already probabilities).* The graph

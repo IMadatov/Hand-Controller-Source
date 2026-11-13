@@ -264,19 +264,40 @@ TEST(HandTracker, LetterboxMatchesPaddedSquareInput) {
   }
 }
 
-TEST(HandTracker, RejectsConfigsOtherThanSingleHand) {
-  // Fix round (b): max_hands used to be accepted and silently ignored. The
-  // constructor now refuses anything but 1, so Task 10 must deliberately
-  // lift the guard (and update this test) rather than discover by experiment
-  // that asking for two hands quietly yields one.
+TEST(HandTracker, RejectsOutOfRangeMaxHands) {
+  // HISTORY, so the loosening here is not mistaken for a regression. Task 8
+  // shipped this as RejectsConfigsOtherThanSingleHand: max_hands > 1 threw,
+  // deliberately, so that Task 10 had to lift the guard consciously rather
+  // than discover by experiment that the field was inert. Task 10 lifted it
+  // (ruling T10-E) -- two hands are now really tracked, pinned by the
+  // HandTrackerTwo suite -- so max_hands = 2, which is also
+  // HandTrackerConfig's default, must now CONSTRUCT.
   //
-  // Note HandTrackerConfig::max_hands defaults to 2 -- forward-looking, per
-  // the brief -- so the default-constructed config is among the rejected
-  // ones today. That is intentional and documented on the field.
+  // What remains rejected is what is genuinely unsupported, and the bounds
+  // are not arbitrary: < 1 is meaningless, and the upper bound comes from
+  // hc::kMaxAssociationEntries, past which AssignDetectionsToSlots silently
+  // ignores slots and detections instead of associating them.
   Metrics m;
-  EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/2), m),
-               std::invalid_argument);
+  EXPECT_NO_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/1), m));
+  EXPECT_NO_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/2), m));
   EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/0), m),
                std::invalid_argument);
-  EXPECT_NO_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/1), m));
+  EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/-1), m),
+               std::invalid_argument);
+  // 2*max_hands - 1 must stay <= kMaxAssociationEntries (64), so 32 is the
+  // last accepted value and 33 is the first rejected one. Pinning both sides
+  // of the boundary, not just one, so an off-by-one in the check fails here.
+  EXPECT_NO_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/32), m));
+  EXPECT_THROW(HandTrackerOnnx(DefaultTestConfig(/*max_hands=*/33), m),
+               std::invalid_argument);
+}
+
+TEST(HandTracker, DefaultConfigConstructs) {
+  // The default HandTrackerConfig (max_hands = 2) used to throw. It is now
+  // the supported two-hand path, which is the whole point of Task 10.
+  Metrics m;
+  hc::HandTrackerConfig cfg = DefaultTestConfig(/*max_hands=*/1);
+  cfg.max_hands = hc::HandTrackerConfig{}.max_hands;
+  ASSERT_EQ(cfg.max_hands, 2);
+  EXPECT_NO_THROW(HandTrackerOnnx(cfg, m));
 }

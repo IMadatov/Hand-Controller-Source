@@ -43,14 +43,18 @@ struct HandTrackerConfig {
   std::string palm_model_path;
   std::string landmark_model_path;
 
-  // Upper bound on simultaneously tracked hands.
+  // Upper bound on simultaneously tracked hands. HandTrackerOnnx honours it
+  // for real: it holds exactly this many tracking slots, and a detection that
+  // finds no free slot is dropped.
   //
-  // This default of 2 is FORWARD-LOOKING. As of this phase only the
-  // single-hand path exists, and HandTrackerOnnx's constructor THROWS
-  // std::invalid_argument on max_hands > 1 rather than silently tracking one
-  // hand anyway. A caller today must therefore set this to 1 explicitly; the
-  // default becomes usable when Task 10 adds two-hand association and lifts
-  // the guard.
+  // Note this is a CEILING, not a target. The tracker keeps re-running the
+  // palm detector every frame for as long as any slot is empty, so setting
+  // this to 2 in a scene that only ever shows one hand costs a palm detection
+  // on every single frame. Set it to the number of hands you actually intend
+  // to track.
+  //
+  // Must be >= 1, and small enough that 2*max_hands - 1 stays within
+  // hc::kMaxAssociationEntries (so, <= 32); the constructor throws otherwise.
   int max_hands = 2;
 
   // A track is dropped when the landmark model's presence output falls below

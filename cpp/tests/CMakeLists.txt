@@ -42,3 +42,14 @@ target_compile_definitions(test_hand_tracker PRIVATE
   HC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 target_include_directories(test_hand_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Task 10's two-hand tests need exactly the same injected paths: the same
+# models, and the same committed fixture (which they composite into
+# multi-hand frames via fixture_image.hpp).
+hc_add_test(test_hand_tracker_two test_hand_tracker_two.cpp LIBS hc_core)
+target_compile_definitions(test_hand_tracker_two PRIVATE
+  HC_PALM_MODEL_PATH="${HC_PALM_MODEL}"
+  HC_LANDMARK_MODEL_PATH="${HC_LANDMARK_MODEL}"
+  HC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+target_include_directories(test_hand_tracker_two PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
