@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -59,15 +60,34 @@ constexpr float kDefaultAssociationIou = 0.3f;
 // before converting back, or the bounds are wrong on any non-square frame.
 Rect AxisAlignedBounds(const RotatedRect& r, float aspect);
 
+// The maximum number of slots, and the maximum number of detections, that
+// AssignDetectionsToSlots considers in one call. This is a per-frame path,
+// so its consumed-side bookkeeping is fixed-capacity bitmask storage rather
+// than per-call heap allocation; 64 is the width of that bitmask and sits
+// far above the two-hand ceiling this phase targets. Entries past the cap
+// are ignored rather than silently misassociated.
+constexpr std::size_t kMaxAssociationEntries = 64;
+
 // Returns the index of the best-overlapping active slot for detection `d`
-// (by IoU of AxisAlignedBounds(slot.roi) against d.box, both already assumed
-// frame-normalized), or -1 if no active slot overlaps `d` with IoU >
+// (by IoU of AxisAlignedBounds(slot.roi, aspect) against d.box, both already
+// assumed frame-normalized), or -1 if no active slot overlaps `d` with IoU >
 // iou_threshold. Inactive slots are never matched. This function is
 // per-detection and does not consume anything, so it cannot by itself
 // enforce one-detection-per-slot across a batch -- see
 // AssignDetectionsToSlots for that.
+//
+// `aspect` is frame width / frame height and MUST be the real frame's
+// aspect; it is not a free choice. A TrackSlot's roi is rotated --
+// RoiFromPalm derives the rotation from palm keypoints, so it is
+// essentially never 0 -- and rotating a rect at the wrong aspect does not
+// merely rescale its axis-aligned hull, it produces a geometrically
+// different hull, shifting the IoU by roughly 10% on a 16:9 frame. Only
+// slot.roi passes through AxisAlignedBounds; d.box is already axis-aligned
+// and carries no aspect dependence, so there is no "both boxes scale
+// together" invariance available to excuse a hardcoded aspect here.
 int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
-                          const PalmDetection& d, float iou_threshold);
+                          const PalmDetection& d, float aspect,
+                          float iou_threshold);
 
 // Greedily assigns each detection in `dets` to at most one active slot in
 // `slots`, and each slot to at most one detection, by descending IoU over
@@ -75,9 +95,15 @@ int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
 // (slot index, detection index) so the result never depends on input order.
 // Returns a vector parallel to `dets`: result[i] is the slot index matched
 // to dets[i], or -1 if dets[i] is unmatched (needs a new slot).
+//
+// `aspect` carries the same meaning and the same hard requirement as in
+// MatchSlotForDetection above.
+//
+// Only the first kMaxAssociationEntries slots and the first
+// kMaxAssociationEntries detections are considered; see that constant.
 std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
                                          const std::vector<PalmDetection>& dets,
-                                         float iou_threshold);
+                                         float aspect, float iou_threshold);
 
 // Returns a monotonically increasing track id, starting at 1. Never returns
 // 0 and never reuses an id (process-global, thread-safe counter). 0 is

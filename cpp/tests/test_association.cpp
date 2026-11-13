@@ -25,10 +25,11 @@ PalmDetection MakeDetection(float x, float y, float w, float h) {
 
 TrackSlot MakeSlot(std::uint32_t id, float cx, float cy, float w, float h,
                     bool active = true,
-                    Handedness handedness = Handedness::Unknown) {
+                    Handedness handedness = Handedness::Unknown,
+                    float rotation_rad = 0.0f) {
   TrackSlot s{};
   s.id = id;
-  s.roi = RotatedRect{Point2{cx, cy}, w, h, 0.0f};
+  s.roi = RotatedRect{Point2{cx, cy}, w, h, rotation_rad};
   s.handedness = handedness;
   s.active = active;
   return s;
@@ -72,14 +73,14 @@ TEST(Association, DetectionOverlappingTrackedSlotMatchesIt) {  // Review Focus 3
   // returns an already-tracked hand" case the spec warns about.
   std::vector<TrackSlot> slots = {MakeSlot(1, 0.5f, 0.5f, 0.3f, 0.3f)};
   PalmDetection d = MakeDetection(0.36f, 0.36f, 0.3f, 0.3f);
-  int idx = MatchSlotForDetection(slots, d, kDefaultAssociationIou);
+  int idx = MatchSlotForDetection(slots, d, /*aspect=*/1.0f, kDefaultAssociationIou);
   EXPECT_EQ(idx, 0);
 }
 
 TEST(Association, DisjointDetectionIsUnmatched) {
   std::vector<TrackSlot> slots = {MakeSlot(1, 0.1f, 0.1f, 0.1f, 0.1f)};
   PalmDetection d = MakeDetection(0.8f, 0.8f, 0.1f, 0.1f);
-  int idx = MatchSlotForDetection(slots, d, kDefaultAssociationIou);
+  int idx = MatchSlotForDetection(slots, d, /*aspect=*/1.0f, kDefaultAssociationIou);
   EXPECT_EQ(idx, -1);
 }
 
@@ -91,7 +92,7 @@ TEST(Association, TwoHandsKeepTheirOwnSlots) {
   std::vector<PalmDetection> dets = {MakeDetection(0.65f, 0.4f, 0.2f, 0.2f),
                                      MakeDetection(0.15f, 0.4f, 0.2f, 0.2f)};
   std::vector<int> result =
-      AssignDetectionsToSlots(slots, dets, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result.size(), 2u);
   EXPECT_EQ(result[0], 1);  // detection near right slot -> slot index 1
   EXPECT_EQ(result[1], 0);  // detection near left slot -> slot index 0
@@ -101,14 +102,14 @@ TEST(Association, CrossingHandsDoNotSwapSlots) {  // Review Focus 3
   // Slots at 0.45 and 0.55 with detections at 0.46 and 0.54: each detection
   // takes the nearer slot. Boxes are sized (0.2 wide) so that BOTH cross
   // pairs (slot0/det1 and slot1/det0) have IoU ABOVE kDefaultAssociationIou
-  // (0.3) -- not merely nonzero. AssignDetectionsToSlots filters pairs by
-  // `iou > iou_threshold` before the sort ever runs, so a cross pair with
+  // (0.3) -- not merely nonzero. AssignDetectionsToSlots only ever considers
+  // a pair whose IoU exceeds iou_threshold, so a cross pair with
   // nonzero-but-below-threshold IoU (as a 0.14-wide box would give here,
-  // ~0.217) never reaches the sort and the test would be vacuous: the sort
-  // comparator could be broken and this geometry would still pass, because
-  // greedy assignment would be forced regardless. At 0.2 wide, all four
-  // pairs clear the threshold, so the sort and its tie-break are genuinely
-  // exercised.
+  // ~0.217) is never a candidate at all and the test would be vacuous: the
+  // greedy selection could be broken and this geometry would still pass,
+  // because the assignment would be forced regardless. At 0.2 wide, all four
+  // pairs clear the threshold, so the descending-IoU selection and its
+  // tie-break are genuinely exercised.
   //
   // Pairwise IoUs (all boxes 0.2 x 0.2):
   //   slot0 (0.45) vs det0 (0.46): centers 0.01 apart  -> IoU ~0.9048
@@ -116,8 +117,8 @@ TEST(Association, CrossingHandsDoNotSwapSlots) {  // Review Focus 3
   //   slot1 (0.55) vs det0 (0.46): centers 0.09 apart  -> IoU ~0.3793
   //   slot1 (0.55) vs det1 (0.54): centers 0.01 apart  -> IoU ~0.9048
   // The near pairs strictly dominate the cross pairs, so the correct greedy
-  // assignment is unambiguous, but all four pairs are live candidates for
-  // the sort, so a broken (e.g. reversed) comparator processes a cross pair
+  // assignment is unambiguous, but all four pairs are live candidates, so
+  // selecting by ascending instead of descending IoU takes a cross pair
   // first and corrupts the result.
   std::vector<TrackSlot> slots = {MakeSlot(1, 0.45f, 0.5f, 0.2f, 0.2f),
                                    MakeSlot(2, 0.55f, 0.5f, 0.2f, 0.2f)};
@@ -126,7 +127,7 @@ TEST(Association, CrossingHandsDoNotSwapSlots) {  // Review Focus 3
       MakeDetection(0.54f - 0.1f, 0.5f - 0.1f, 0.2f, 0.2f)};
 
   std::vector<int> result_fwd =
-      AssignDetectionsToSlots(slots, dets_fwd, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets_fwd, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result_fwd.size(), 2u);
   EXPECT_EQ(result_fwd[0], 0);  // det0 (0.46) -> slot0 (0.45)
   EXPECT_EQ(result_fwd[1], 1);  // det1 (0.54) -> slot1 (0.55)
@@ -135,7 +136,7 @@ TEST(Association, CrossingHandsDoNotSwapSlots) {  // Review Focus 3
   // The result must track the physical correspondence, not input order.
   std::vector<PalmDetection> dets_rev = {dets_fwd[1], dets_fwd[0]};
   std::vector<int> result_rev =
-      AssignDetectionsToSlots(slots, dets_rev, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets_rev, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result_rev.size(), 2u);
   EXPECT_EQ(result_rev[0], 1);  // det1 (0.54) -> slot1 (0.55)
   EXPECT_EQ(result_rev[1], 0);  // det0 (0.46) -> slot0 (0.45)
@@ -150,7 +151,7 @@ TEST(Association, OneSlotTakesOnlyOneDetection) {
   std::vector<PalmDetection> dets = {MakeDetection(0.36f, 0.36f, 0.3f, 0.3f),
                                      MakeDetection(0.37f, 0.37f, 0.3f, 0.3f)};
   std::vector<int> result =
-      AssignDetectionsToSlots(slots, dets, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result.size(), 2u);
   int matched_count = (result[0] != -1 ? 1 : 0) + (result[1] != -1 ? 1 : 0);
   EXPECT_EQ(matched_count, 1);
@@ -158,6 +159,52 @@ TEST(Association, OneSlotTakesOnlyOneDetection) {
   for (int r : result) {
     if (r != -1) EXPECT_EQ(r, 0);
   }
+}
+
+TEST(Association, RotatedSlotUsesTheFrameAspectAtBothCallSites) {
+  // Review fix round 1, item (2): AxisAlignedBounds is well covered on its
+  // own, but its two real call sites (MatchSlotForDetection and
+  // AssignDetectionsToSlots) were previously only ever exercised with
+  // rotation == 0, which is exactly the axis along which a hardcoded
+  // aspect is invisible. A real TrackSlot::roi comes from RoiFromPalm,
+  // whose rotation is derived from palm keypoints and is essentially never
+  // zero, so the rotated + non-unit-aspect case is the NORMAL case.
+  //
+  // Geometry: slot roi centered at (0.5, 0.5), w 0.25, h 0.15, rotated 45
+  // degrees, on a 16:9 frame. Detection is an axis-aligned 0.22 box centered
+  // at (0.58, 0.5). The rotated hull differs in SHAPE, not just scale,
+  // between the two aspects:
+  //   AxisAlignedBounds(roi, 16/9) -> w 0.2364, h 0.4203 -> IoU 0.2831
+  //   AxisAlignedBounds(roi, 1.0)  -> w 0.2828, h 0.2828 -> IoU 0.4159
+  // A threshold of 0.35 sits between them with ~0.067 of margin on each
+  // side, so the two aspects give OPPOSITE match decisions: with the real
+  // frame aspect the detection does not clear the bar, with a hardcoded
+  // 1.0 it does.
+  constexpr float kAspect = 16.0f / 9.0f;
+  constexpr float kThreshold = 0.35f;
+  std::vector<TrackSlot> slots = {
+      MakeSlot(1, 0.5f, 0.5f, 0.25f, 0.15f, /*active=*/true,
+               Handedness::Unknown, /*rotation_rad=*/kPi / 4.0f)};
+  PalmDetection d = MakeDetection(0.58f - 0.11f, 0.5f - 0.11f, 0.22f, 0.22f);
+  std::vector<PalmDetection> dets = {d};
+
+  // Call site 1: MatchSlotForDetection.
+  EXPECT_EQ(MatchSlotForDetection(slots, d, kAspect, kThreshold), -1)
+      << "at the true 16:9 aspect the rotated hull gives IoU 0.2831, below "
+         "the 0.35 threshold";
+  EXPECT_EQ(MatchSlotForDetection(slots, d, 1.0f, kThreshold), 0)
+      << "at aspect 1 the same rotated hull gives IoU 0.4159, above it";
+
+  // Call site 2: AssignDetectionsToSlots.
+  std::vector<int> at_aspect =
+      AssignDetectionsToSlots(slots, dets, kAspect, kThreshold);
+  ASSERT_EQ(at_aspect.size(), 1u);
+  EXPECT_EQ(at_aspect[0], -1);
+
+  std::vector<int> at_unit =
+      AssignDetectionsToSlots(slots, dets, 1.0f, kThreshold);
+  ASSERT_EQ(at_unit.size(), 1u);
+  EXPECT_EQ(at_unit[0], 0);
 }
 
 TEST(Association, DetectionMatchedToOneSlotIsNotReassignedToAnother) {
@@ -179,7 +226,36 @@ TEST(Association, DetectionMatchedToOneSlotIsNotReassignedToAnother) {
   std::vector<PalmDetection> dets = {MakeDetection(0.50f - 0.15f, 0.5f - 0.15f, 0.3f, 0.3f),
                                      MakeDetection(0.60f - 0.15f, 0.5f - 0.15f, 0.3f, 0.3f)};
   std::vector<int> result =
-      AssignDetectionsToSlots(slots, dets, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets, /*aspect=*/1.0f, kDefaultAssociationIou);
+  ASSERT_EQ(result.size(), 2u);
+  EXPECT_EQ(result[0], 0);
+  EXPECT_EQ(result[1], 1);
+}
+
+TEST(Association, SlotMatchedToOneDetectionIsNotReusedByAnother) {
+  // The mirror of the test above, and the only test that can catch a dropped
+  // slot_consumed check. OneSlotTakesOnlyOneDetection cannot: with a single
+  // slot, max_pairs = min(n_slots, n_dets) = 1 bounds the greedy loop to one
+  // iteration, so the loop exits before slot_consumed is ever read a second
+  // time. Two slots and two detections are the minimum that forces a second
+  // iteration.
+  //
+  // slot0 outscores slot1 on BOTH detections, so if its consumption is not
+  // tracked it wins det1 as well and det1 never reaches slot1 -- the only
+  // slot it overlaps at all.
+  //
+  // Pairwise IoUs (all boxes 0.2 x 0.2, aspect 1, same y): slot0-det0
+  // 0.8182, slot0-det1 0.4286, slot1-det0 0.0 (disjoint), slot1-det1 0.3333.
+  // Correct greedy: take (slot0,det0) at 0.8182, then slot0 is spent and the
+  // best survivor is (slot1,det1) at 0.3333, which clears the 0.3 threshold.
+  // Without slot_consumed the second pick is (slot0,det1) at 0.4286 instead.
+  std::vector<TrackSlot> slots = {MakeSlot(1, 0.52f, 0.5f, 0.2f, 0.2f),
+                                   MakeSlot(2, 0.70f, 0.5f, 0.2f, 0.2f)};
+  std::vector<PalmDetection> dets = {
+      MakeDetection(0.50f - 0.1f, 0.5f - 0.1f, 0.2f, 0.2f),
+      MakeDetection(0.60f - 0.1f, 0.5f - 0.1f, 0.2f, 0.2f)};
+  std::vector<int> result =
+      AssignDetectionsToSlots(slots, dets, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result.size(), 2u);
   EXPECT_EQ(result[0], 0);
   EXPECT_EQ(result[1], 1);
@@ -193,7 +269,7 @@ TEST(Association, HandednessDisagreementDoesNotBreakSpatialMatch) {
   std::vector<TrackSlot> slots = {
       MakeSlot(1, 0.5f, 0.5f, 0.3f, 0.3f, true, Handedness::Left)};
   PalmDetection d = MakeDetection(0.36f, 0.36f, 0.3f, 0.3f);
-  int idx = MatchSlotForDetection(slots, d, kDefaultAssociationIou);
+  int idx = MatchSlotForDetection(slots, d, /*aspect=*/1.0f, kDefaultAssociationIou);
   EXPECT_EQ(idx, 0);
 }
 
@@ -201,12 +277,12 @@ TEST(Association, InactiveSlotsAreNeverMatched) {
   std::vector<TrackSlot> slots = {
       MakeSlot(1, 0.5f, 0.5f, 0.3f, 0.3f, /*active=*/false)};
   PalmDetection d = MakeDetection(0.36f, 0.36f, 0.3f, 0.3f);
-  int idx = MatchSlotForDetection(slots, d, kDefaultAssociationIou);
+  int idx = MatchSlotForDetection(slots, d, /*aspect=*/1.0f, kDefaultAssociationIou);
   EXPECT_EQ(idx, -1);
 
   std::vector<PalmDetection> dets = {d};
   std::vector<int> result =
-      AssignDetectionsToSlots(slots, dets, kDefaultAssociationIou);
+      AssignDetectionsToSlots(slots, dets, /*aspect=*/1.0f, kDefaultAssociationIou);
   ASSERT_EQ(result.size(), 1u);
   EXPECT_EQ(result[0], -1);
 }

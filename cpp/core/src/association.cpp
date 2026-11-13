@@ -1,9 +1,11 @@
 #include "hc/association.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 namespace hc {
 
@@ -40,7 +42,8 @@ Rect AxisAlignedBounds(const RotatedRect& r, float aspect) {
 }
 
 int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
-                          const PalmDetection& d, float iou_threshold) {
+                          const PalmDetection& d, float aspect,
+                          float iou_threshold) {
   int best_idx = -1;
   float best_iou = iou_threshold;
   for (std::size_t i = 0; i < slots.size(); ++i) {
@@ -48,13 +51,14 @@ int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
     if (!slot.active) {
       continue;
     }
-    // AxisAlignedBounds needs an aspect; since both slot.roi and d.box are
-    // already in frame-normalized space by this file's contract, and IoU is
-    // invariant under a per-axis scaling applied to both boxes, aspect 1.0
-    // is a safe common space for this comparison (d.box is axis-aligned
-    // already, so it carries no aspect dependence of its own).
-    const Rect bounds = AxisAlignedBounds(slot.roi, 1.0f);
+    // The real frame aspect, not a convenient constant: slot.roi is rotated,
+    // and the hull of a rotated rect is aspect-dependent in shape, not just
+    // in scale. See the header for why no IoU invariance rescues a hardcode.
+    const Rect bounds = AxisAlignedBounds(slot.roi, aspect);
     const float iou = IoU(bounds, d.box);
+    // Strictly greater, so on an exact tie the lower slot index wins --
+    // the same deterministic (slot index, detection index) ordering
+    // AssignDetectionsToSlots uses.
     if (iou > best_iou) {
       best_iou = iou;
       best_idx = static_cast<int>(i);
@@ -65,53 +69,72 @@ int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
 
 std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
                                          const std::vector<PalmDetection>& dets,
-                                         float iou_threshold) {
+                                         float aspect, float iou_threshold) {
+  // The returned vector is the function's result, so it is the one
+  // allocation kept. Everything else below is fixed-capacity: this runs once
+  // per frame, and the previous shape (a pairs vector plus two
+  // std::vector<bool>s) put three heap allocations on that path.
   std::vector<int> result(dets.size(), -1);
 
-  struct Pair {
-    std::size_t slot_index;
-    std::size_t det_index;
-    float iou;
-  };
+  const std::size_t n_slots = std::min(slots.size(), kMaxAssociationEntries);
+  const std::size_t n_dets = std::min(dets.size(), kMaxAssociationEntries);
 
-  std::vector<Pair> pairs;
-  pairs.reserve(slots.size() * dets.size());
-  for (std::size_t s = 0; s < slots.size(); ++s) {
+  // Slot hulls depend only on the slot, not on the detection, so they are
+  // computed once here rather than once per (slot, detection) pair.
+  std::array<Rect, kMaxAssociationEntries> slot_bounds{};
+  for (std::size_t s = 0; s < n_slots; ++s) {
     if (!slots[s].active) {
       continue;
     }
-    const Rect bounds = AxisAlignedBounds(slots[s].roi, 1.0f);
-    for (std::size_t j = 0; j < dets.size(); ++j) {
-      const float iou = IoU(bounds, dets[j].box);
-      if (iou > iou_threshold) {
-        pairs.push_back(Pair{s, j, iou});
-      }
-    }
+    slot_bounds[s] = AxisAlignedBounds(slots[s].roi, aspect);
   }
 
-  // Greedy by descending IoU. Ties broken deterministically by
-  // (slot index, detection index) -- ruling T9-G -- so the result never
-  // depends on input order.
-  std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
-    if (a.iou != b.iou) {
-      return a.iou > b.iou;
-    }
-    if (a.slot_index != b.slot_index) {
-      return a.slot_index < b.slot_index;
-    }
-    return a.det_index < b.det_index;
-  });
+  // Consumed-side bookkeeping as bitmasks instead of two heap vectors.
+  std::uint64_t slot_consumed = 0;
+  std::uint64_t det_consumed = 0;
 
-  std::vector<bool> slot_consumed(slots.size(), false);
-  std::vector<bool> det_consumed(dets.size(), false);
+  // Greedy by descending IoU, expressed as "repeatedly take the best
+  // remaining pair" rather than "build every pair, sort, then walk". The
+  // two are equivalent -- each iteration picks the globally largest IoU
+  // among unconsumed pairs -- but this form needs no pair buffer and no
+  // sort. At most min(n_slots, n_dets) pairs can ever be accepted, so that
+  // bounds the outer loop.
+  const std::size_t max_pairs = std::min(n_slots, n_dets);
+  for (std::size_t accepted = 0; accepted < max_pairs; ++accepted) {
+    std::size_t best_s = 0;
+    std::size_t best_j = 0;
+    float best_iou = iou_threshold;
+    bool found = false;
 
-  for (const Pair& p : pairs) {
-    if (slot_consumed[p.slot_index] || det_consumed[p.det_index]) {
-      continue;
+    // Scanning slots ascending and detections ascending, and replacing the
+    // incumbent only on a STRICTLY greater IoU, makes ties resolve to the
+    // lowest (slot index, detection index) -- ruling T9-G -- so the result
+    // never depends on input order.
+    for (std::size_t s = 0; s < n_slots; ++s) {
+      if (!slots[s].active || (slot_consumed & (std::uint64_t{1} << s))) {
+        continue;
+      }
+      for (std::size_t j = 0; j < n_dets; ++j) {
+        if (det_consumed & (std::uint64_t{1} << j)) {
+          continue;
+        }
+        const float iou = IoU(slot_bounds[s], dets[j].box);
+        if (iou > best_iou) {
+          best_iou = iou;
+          best_s = s;
+          best_j = j;
+          found = true;
+        }
+      }
     }
-    result[p.det_index] = static_cast<int>(p.slot_index);
-    slot_consumed[p.slot_index] = true;
-    det_consumed[p.det_index] = true;
+
+    if (!found) {
+      break;
+    }
+
+    result[best_j] = static_cast<int>(best_s);
+    slot_consumed |= std::uint64_t{1} << best_s;
+    det_consumed |= std::uint64_t{1} << best_j;
   }
 
   return result;
