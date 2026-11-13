@@ -29,6 +29,7 @@ hc_add_test(test_warp test_warp.cpp LIBS hc_core)
 hc_add_test(test_anchors test_anchors.cpp LIBS hc_core)
 hc_add_test(test_palm_decode test_palm_decode.cpp LIBS hc_core)
 hc_add_test(test_roi test_roi.cpp LIBS hc_core)
+hc_add_test(test_association test_association.cpp LIBS hc_core)
 
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_core)
 # The tracker tests are the only ones that touch real model files and the

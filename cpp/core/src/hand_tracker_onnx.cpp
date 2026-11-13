@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "hc/anchors.hpp"
+#include "hc/association.hpp"
 #include "hc/geometry.hpp"
 #include "hc/palm_decode.hpp"
 #include "hc/roi.hpp"
@@ -261,8 +262,10 @@ class HandTrackerOnnx::Impl {
     const PalmDetection framed =
         PalmToFrameSpace(detections[0], square, aspect);
     roi_ = RoiFromPalm(framed, aspect, palm_roi_opts_);
-    ++next_track_id_;
-    track_id_ = next_track_id_;
+    // Ruling T9-C: track ids now come from the process-global, atomic
+    // NextTrackId() (association.hpp) instead of an instance-local counter,
+    // so single-hand and future multi-hand tracks never collide on id.
+    track_id_ = NextTrackId();
     tracking_ = true;
     return true;
   }
@@ -377,7 +380,6 @@ class HandTrackerOnnx::Impl {
   bool tracking_ = false;
   RotatedRect roi_{};
   std::uint32_t track_id_ = 0;
-  std::uint32_t next_track_id_ = 0;
 };
 
 HandTrackerOnnx::HandTrackerOnnx(const HandTrackerConfig& config,

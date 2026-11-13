@@ -6,6 +6,7 @@ add_library(hc_core STATIC
   src/palm_decode.cpp
   src/roi.cpp
   src/hand_tracker_onnx.cpp
+  src/association.cpp
 )
 
 target_include_directories(hc_core PUBLIC
