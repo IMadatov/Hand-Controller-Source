@@ -138,6 +138,18 @@ TEST(PalmDecode, OverlappingDetectionsCollapseToOne) {
   //         = 0.400175483
   //   avg.y = 0.395833333 (both inputs equal on y)
   //   avg.w = avg.h = 0.208333333 (both inputs equal)
+  //
+  // Keypoints are deliberately DISTINCT and NONZERO on both candidates, with
+  // opposite signs, so that for every keypoint the top candidate's value,
+  // the lower candidate's value, and their score-weighted mean are three
+  // visibly different numbers (minimum separation 0.0136 at keypoint 0,
+  // growing to 0.095 at keypoint 6 -- all far above the 1e-5 tolerance).
+  // Ruling T6-B pins that MediaPipe averages ONLY the bounding box, so the
+  // emitted keypoints must equal candidate A's decoded keypoints exactly:
+  // not B's, and not the average. With all-zero keypoint rows this would be
+  // unfalsifiable, since averaging zero with zero is zero.
+  //   A keypoint k raw offsets = (+6*(k+1), +3*(k+1)) about anchor (0.5, 0.5)
+  //   B keypoint k raw offsets = (-6*(k+1), -3*(k+1)) about anchor (0.51, 0.5)
   std::vector<Anchor> anchors = {Anchor{0.5f, 0.5f, 1.0f, 1.0f},
                                   Anchor{0.51f, 0.5f, 1.0f, 1.0f}};
   std::vector<float> boxes = ZeroBoxes(anchors.size());
@@ -145,6 +157,14 @@ TEST(PalmDecode, OverlappingDetectionsCollapseToOne) {
   boxes[0 * 18 + 3] = 40.0f;  // anchor A dh
   boxes[1 * 18 + 2] = 40.0f;  // anchor B dw
   boxes[1 * 18 + 3] = 40.0f;  // anchor B dh
+  for (int k = 0; k < 7; ++k) {
+    const float mag_x = 6.0f * static_cast<float>(k + 1);
+    const float mag_y = 3.0f * static_cast<float>(k + 1);
+    boxes[0 * 18 + 4 + k * 2] = mag_x;       // anchor A keypoint k dx
+    boxes[0 * 18 + 4 + k * 2 + 1] = mag_y;   // anchor A keypoint k dy
+    boxes[1 * 18 + 4 + k * 2] = -mag_x;      // anchor B keypoint k dx
+    boxes[1 * 18 + 4 + k * 2 + 1] = -mag_y;  // anchor B keypoint k dy
+  }
   std::vector<float> scores = {3.0f, 1.0f};
 
   PalmDecodeOptions o = DefaultsForSyntheticAnchors();
@@ -152,8 +172,7 @@ TEST(PalmDecode, OverlappingDetectionsCollapseToOne) {
       DecodePalmDetections(boxes.data(), scores.data(), anchors, o);
 
   ASSERT_EQ(dets.size(), 1u);
-  // The score and keypoints must be the higher-scoring candidate's,
-  // unaveraged.
+  // The score must be the higher-scoring candidate's, unaveraged.
   EXPECT_NEAR(dets[0].score, 0.952574127f, 1e-5f);
   // The box must be the score-weighted mean, NOT candidate A's own box.
   EXPECT_NEAR(dets[0].box.x, 0.400175483f, 1e-5f);
@@ -162,6 +181,41 @@ TEST(PalmDecode, OverlappingDetectionsCollapseToOne) {
   EXPECT_NEAR(dets[0].box.h, 0.208333333f, 1e-5f);
   EXPECT_FALSE(std::abs(dets[0].box.x - 0.395833333f) < 1e-6f)
       << "box must be the weighted average, not candidate A's own box";
+
+  // The keypoints must be candidate A's exactly -- averaging the box must
+  // not have dragged the keypoints toward B.
+  const float kScoreA = 0.952574127f;
+  const float kScoreB = 0.731058579f;
+  for (int k = 0; k < 7; ++k) {
+    const float mag_x = 6.0f * static_cast<float>(k + 1);
+    const float mag_y = 3.0f * static_cast<float>(k + 1);
+    const float a_x = 0.5f + mag_x / 192.0f;
+    const float a_y = 0.5f + mag_y / 192.0f;
+    const float b_x = 0.51f - mag_x / 192.0f;
+    const float b_y = 0.5f - mag_y / 192.0f;
+    const float avg_x = (kScoreA * a_x + kScoreB * b_x) / (kScoreA + kScoreB);
+    const float avg_y = (kScoreA * a_y + kScoreB * b_y) / (kScoreA + kScoreB);
+
+    // Sanity-check that this keypoint actually discriminates: the three
+    // candidate outcomes must be mutually distinct by well over the
+    // assertion tolerance, so passing cannot be an accident of them
+    // coinciding.
+    ASSERT_GT(std::abs(a_x - b_x), 1e-3f) << "keypoint " << k;
+    ASSERT_GT(std::abs(a_x - avg_x), 1e-3f) << "keypoint " << k;
+    ASSERT_GT(std::abs(b_x - avg_x), 1e-3f) << "keypoint " << k;
+    ASSERT_GT(std::abs(a_y - b_y), 1e-3f) << "keypoint " << k;
+    ASSERT_GT(std::abs(a_y - avg_y), 1e-3f) << "keypoint " << k;
+    ASSERT_GT(std::abs(b_y - avg_y), 1e-3f) << "keypoint " << k;
+
+    EXPECT_NEAR(dets[0].keypoints[static_cast<std::size_t>(k)].x, a_x, 1e-5f)
+        << "keypoint " << k
+        << " x must stay the top candidate's, unaveraged (B's would be "
+        << b_x << ", the weighted mean would be " << avg_x << ")";
+    EXPECT_NEAR(dets[0].keypoints[static_cast<std::size_t>(k)].y, a_y, 1e-5f)
+        << "keypoint " << k
+        << " y must stay the top candidate's, unaveraged (B's would be "
+        << b_y << ", the weighted mean would be " << avg_y << ")";
+  }
 }
 
 TEST(PalmDecode, DisjointDetectionsBothSurvive) {
@@ -264,6 +318,69 @@ TEST(PalmDecode, RespectsMaxResults) {
   EXPECT_GT(dets[0].score, dets[1].score);
   EXPECT_NEAR(dets[0].score, 1.0f / (1.0f + std::exp(-3.0f)), 1e-5f);
   EXPECT_NEAR(dets[1].score, 1.0f / (1.0f + std::exp(-2.0f)), 1e-5f);
+}
+
+TEST(PalmDecode, NonPositiveMaxResultsMeansUnlimited) {
+  // Ruling T6-C: any max_results <= 0 means unlimited, so the decoder never
+  // silently truncates. Build 12 mutually disjoint above-threshold
+  // detections -- more than any plausible cap (and far more than the
+  // tracker's eventual two-hand policy) -- on a 4x3 grid at
+  // x in {0.1, 0.3, 0.5, 0.7} and y in {0.15, 0.5, 0.85}, each with raw box
+  // offsets [0,0,10,10] so every box is 10/192 = 0.052083333 square.
+  // Spacing (0.2 in x, 0.35 in y) vastly exceeds the box size, so the
+  // maximum pairwise IoU is exactly 0 -- NMS cannot merge or suppress
+  // anything, which isolates the cap as the only thing under test.
+  // Logits are 1.0 + 0.1*i for i in [0, 12), so the smallest is
+  // sigmoid(1.0) = 0.731 (comfortably above min_score 0.5) and all 12 are
+  // distinct.
+  std::vector<Anchor> anchors;
+  const float xs[4] = {0.1f, 0.3f, 0.5f, 0.7f};
+  const float ys[3] = {0.15f, 0.5f, 0.85f};
+  for (int yi = 0; yi < 3; ++yi) {
+    for (int xi = 0; xi < 4; ++xi) {
+      anchors.push_back(Anchor{xs[xi], ys[yi], 1.0f, 1.0f});
+    }
+  }
+  ASSERT_EQ(anchors.size(), 12u);
+
+  std::vector<float> boxes = ZeroBoxes(anchors.size());
+  std::vector<float> scores(anchors.size());
+  for (std::size_t i = 0; i < anchors.size(); ++i) {
+    boxes[i * 18 + 2] = 10.0f;
+    boxes[i * 18 + 3] = 10.0f;
+    scores[i] = 1.0f + 0.1f * static_cast<float>(i);
+  }
+
+  // -1 (the PalmDecodeDefaults() value) must return every detection.
+  PalmDecodeOptions o_neg = DefaultsForSyntheticAnchors();
+  o_neg.max_results = -1;
+  std::vector<PalmDetection> dets_neg =
+      DecodePalmDetections(boxes.data(), scores.data(), anchors, o_neg);
+  EXPECT_EQ(dets_neg.size(), anchors.size())
+      << "max_results == -1 must mean unlimited, not truncated";
+
+  // 0 must behave identically -- both non-positive values are the same rule.
+  PalmDecodeOptions o_zero = DefaultsForSyntheticAnchors();
+  o_zero.max_results = 0;
+  std::vector<PalmDetection> dets_zero =
+      DecodePalmDetections(boxes.data(), scores.data(), anchors, o_zero);
+  EXPECT_EQ(dets_zero.size(), anchors.size())
+      << "max_results == 0 must mean unlimited, not zero results";
+
+  // And the defaults themselves, untouched, must also return everything --
+  // pinning that the shipped default does not truncate.
+  std::vector<PalmDetection> dets_default = DecodePalmDetections(
+      boxes.data(), scores.data(), anchors, DefaultsForSyntheticAnchors());
+  EXPECT_EQ(dets_default.size(), anchors.size())
+      << "PalmDecodeDefaults() must not truncate";
+
+  // Still sorted descending, so "unlimited" did not also mean "unordered".
+  for (std::size_t i = 1; i < dets_neg.size(); ++i) {
+    EXPECT_GE(dets_neg[i - 1].score, dets_neg[i].score)
+        << "detection " << i << " breaks descending score order";
+  }
+  // The highest logit (1.0 + 0.1*11 = 2.1) must lead.
+  EXPECT_NEAR(dets_neg.front().score, 1.0f / (1.0f + std::exp(-2.1f)), 1e-5f);
 }
 
 TEST(PalmDecode, DefaultsMatchModelsMd) {
