@@ -77,7 +77,12 @@ inline OwnedImage LoadRawFixture(const char* path_stem) {
 // A uniform `gray` image of the given size. Used for the "no hand in frame"
 // cases: models.md records sigmoid(best palm score) = 0.057 on uniform
 // mid-grey, well under the 0.5 gate.
-inline OwnedImage SolidImage(int w, int h, std::uint8_t gray) {
+//
+// `format` defaults to Rgb8 (what the committed fixture is) but is a real
+// parameter, because BlackLike below promises to preserve its input's format
+// and cannot keep that promise if this hardcodes one.
+inline OwnedImage SolidImage(int w, int h, std::uint8_t gray,
+                             hc::PixelFormat format = hc::PixelFormat::Rgb8) {
   OwnedImage img;
   img.pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u,
                     gray);
@@ -85,7 +90,7 @@ inline OwnedImage SolidImage(int w, int h, std::uint8_t gray) {
   img.view.width = w;
   img.view.height = h;
   img.view.stride = w * 3;
-  img.view.format = hc::PixelFormat::Rgb8;
+  img.view.format = format;
   return img;
 }
 
@@ -177,7 +182,46 @@ inline OwnedImage SideBySide(const OwnedImage& a, const OwnedImage& b) {
 // changing the geometry would change the letterbox, and so would change the
 // surviving hand's scale in the detector input too.
 inline OwnedImage BlackLike(const OwnedImage& like) {
-  return SolidImage(like.view.width, like.view.height, 0);
+  return SolidImage(like.view.width, like.view.height, 0, like.view.format);
+}
+
+// Translates `src` horizontally by `dx` pixels (positive = to the right),
+// into an image of the SAME size and format; vacated columns are filled with
+// black and content shifted past an edge is dropped.
+//
+// Exists for one purpose: to make a hand MOVE between frames. Every other
+// fixture in this header is static, and a static scene cannot distinguish a
+// tracker that refreshes its association rect from each frame's landmarks
+// from one that never refreshes it after the seeding detection -- the two
+// rects coincide. See HandTrackerTwo.AssociationFollowsAMovingHand.
+inline OwnedImage ShiftX(const OwnedImage& src, int dx) {
+  const int w = src.view.width;
+  const int h = src.view.height;
+  OwnedImage out;
+  out.pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
+                        3u,
+                    0);
+  for (int y = 0; y < h; ++y) {
+    const std::uint8_t* s =
+        src.view.data + static_cast<std::size_t>(y) * src.view.stride;
+    std::uint8_t* d =
+        out.pixels.data() + static_cast<std::size_t>(y) * w * 3u;
+    for (int x = 0; x < w; ++x) {
+      const int sx = x - dx;
+      if (sx < 0 || sx >= w) continue;
+      const std::uint8_t* sp = s + static_cast<std::size_t>(sx) * 3u;
+      std::uint8_t* dp = d + static_cast<std::size_t>(x) * 3u;
+      dp[0] = sp[0];
+      dp[1] = sp[1];
+      dp[2] = sp[2];
+    }
+  }
+  out.view.data = out.pixels.data();
+  out.view.width = w;
+  out.view.height = h;
+  out.view.stride = w * 3;
+  out.view.format = src.view.format;
+  return out;
 }
 
 // Model paths come from compile definitions CMake fills in from

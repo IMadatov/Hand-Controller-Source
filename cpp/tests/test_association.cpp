@@ -166,9 +166,21 @@ TEST(Association, RotatedSlotUsesTheFrameAspectAtBothCallSites) {
   // own, but its two real call sites (MatchSlotForDetection and
   // AssignDetectionsToSlots) were previously only ever exercised with
   // rotation == 0, which is exactly the axis along which a hardcoded
-  // aspect is invisible. A real TrackSlot::roi comes from RoiFromPalm,
-  // whose rotation is derived from palm keypoints and is essentially never
-  // zero, so the rotated + non-unit-aspect case is the NORMAL case.
+  // aspect is invisible.
+  //
+  // CORRECTED (review fix round 2): this comment used to claim the rotated
+  // case was the NORMAL case, on the grounds that a real TrackSlot::roi
+  // comes from RoiFromPalm. It does not. The only production caller --
+  // hand_tracker_onnx.cpp -- stores an UNROTATED tight box there,
+  // precisely because association.hpp requires an extent commensurable
+  // with a PalmDetection::box, which RoiFromPalm's inflated rect is not
+  // (measured: IoU 0.074 for the true pair, against a 0.3 gate).
+  //
+  // The test is still load-bearing, and is the ONLY thing pinning the
+  // aspect parameter at either call site: rotation is permitted by the API
+  // -- AxisAlignedBounds exists for no other reason -- and the moment a
+  // caller stores a rotated rect the aspect stops cancelling and starts
+  // changing match decisions, as the numbers below show.
   //
   // Geometry: slot roi centered at (0.5, 0.5), w 0.25, h 0.15, rotated 45
   // degrees, on a 16:9 frame. Detection is an axis-aligned 0.22 box centered

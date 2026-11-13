@@ -38,10 +38,10 @@ PalmDecodeOptions PalmDecodeDefaults() {
   return o;
 }
 
-std::vector<PalmDetection> DecodePalmDetections(const float* raw_boxes,
-                                                 const float* raw_scores,
-                                                 const std::vector<Anchor>& anchors,
-                                                 const PalmDecodeOptions& o) {
+void DecodePalmDetections(const float* raw_boxes, const float* raw_scores,
+                          const std::vector<Anchor>& anchors,
+                          const PalmDecodeOptions& o,
+                          std::vector<PalmDetection>& out) {
   std::vector<Candidate> candidates;
   candidates.reserve(anchors.size());
 
@@ -124,7 +124,11 @@ std::vector<PalmDetection> DecodePalmDetections(const float* raw_boxes,
   // score-weighted mean of the cluster's boxes. Every cluster member is
   // removed before continuing.
   std::vector<bool> consumed(candidates.size(), false);
-  std::vector<PalmDetection> results;
+  // The caller owns this buffer. Cleared, not reassigned, so a caller that
+  // passes the same vector every frame keeps its capacity and the
+  // push_back below never reallocates after the first frame.
+  std::vector<PalmDetection>& results = out;
+  results.clear();
   results.reserve(candidates.size());
 
   for (std::size_t i = 0; i < candidates.size(); ++i) {
@@ -168,7 +172,17 @@ std::vector<PalmDetection> DecodePalmDetections(const float* raw_boxes,
     }
   }
 
-  return results;
+}
+
+// Thin wrapper: the by-value form every non-per-frame caller (and every
+// test) uses. It allocates exactly the one vector it returns.
+std::vector<PalmDetection> DecodePalmDetections(const float* raw_boxes,
+                                                 const float* raw_scores,
+                                                 const std::vector<Anchor>& anchors,
+                                                 const PalmDecodeOptions& o) {
+  std::vector<PalmDetection> out;
+  DecodePalmDetections(raw_boxes, raw_scores, anchors, o, out);
+  return out;
 }
 
 }  // namespace hc

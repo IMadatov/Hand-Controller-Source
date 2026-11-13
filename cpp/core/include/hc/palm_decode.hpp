@@ -82,6 +82,19 @@ PalmDecodeOptions PalmDecodeDefaults();
 // box with the score-weighted mean of the cluster's boxes
 // (sum(score_i * coord_i) / sum(score_i), computed independently per
 // coordinate). Every cluster member is consumed before continuing.
+//
+// Out-param overload: writes into `out` instead of returning a fresh
+// vector. `out` is cleared first, so its prior contents are irrelevant and
+// only its CAPACITY is reused. This exists for the per-frame tracker path,
+// where the detector may run on every single frame (hand_tracker_onnx.cpp,
+// ruling T10-D) and a returned-by-value vector is a heap allocation per
+// frame. The by-value overload is a thin wrapper around this one, so the
+// two cannot drift.
+void DecodePalmDetections(const float* raw_boxes, const float* raw_scores,
+                          const std::vector<Anchor>& anchors,
+                          const PalmDecodeOptions& o,
+                          std::vector<PalmDetection>& out);
+
 std::vector<PalmDetection> DecodePalmDetections(const float* raw_boxes,
                                                  const float* raw_scores,
                                                  const std::vector<Anchor>& anchors,

@@ -67,14 +67,17 @@ int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
   return best_idx;
 }
 
-std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
-                                         const std::vector<PalmDetection>& dets,
-                                         float aspect, float iou_threshold) {
-  // The returned vector is the function's result, so it is the one
-  // allocation kept. Everything else below is fixed-capacity: this runs once
-  // per frame, and the previous shape (a pairs vector plus two
-  // std::vector<bool>s) put three heap allocations on that path.
-  std::vector<int> result(dets.size(), -1);
+void AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
+                             const std::vector<PalmDetection>& dets,
+                             float aspect, float iou_threshold,
+                             std::vector<int>& out) {
+  // The result vector is now the CALLER's buffer, so a per-frame caller
+  // that reuses it allocates nothing at all here: assign() keeps existing
+  // capacity. Everything else below is fixed-capacity too; the shape this
+  // replaced (a pairs vector plus two std::vector<bool>s) put three heap
+  // allocations on this path.
+  std::vector<int>& result = out;
+  result.assign(dets.size(), -1);
 
   const std::size_t n_slots = std::min(slots.size(), kMaxAssociationEntries);
   const std::size_t n_dets = std::min(dets.size(), kMaxAssociationEntries);
@@ -137,7 +140,16 @@ std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
     det_consumed |= std::uint64_t{1} << best_j;
   }
 
-  return result;
+}
+
+// Thin wrapper: the by-value form every non-per-frame caller (and every
+// test) uses. It allocates exactly the one vector it returns.
+std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
+                                         const std::vector<PalmDetection>& dets,
+                                         float aspect, float iou_threshold) {
+  std::vector<int> out;
+  AssignDetectionsToSlots(slots, dets, aspect, iou_threshold, out);
+  return out;
 }
 
 std::uint32_t NextTrackId() {

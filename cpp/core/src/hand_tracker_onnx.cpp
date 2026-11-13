@@ -186,17 +186,25 @@ class HandTrackerOnnx::Impl {
     assoc_slots_.reserve(slots_.size());
 
     palm_decode_opts_ = PalmDecodeDefaults();
-    // How many detections the decoder is asked for, and why it is NOT just
-    // max_hands. The detector runs over the whole frame, so it re-finds the
-    // hands that are ALREADY tracked; those detections are matched to their
-    // live slots and discarded, and only the leftovers can fill free slots.
-    // In the worst case max_hands - 1 slots are live and each consumes one
-    // detection, while max_hands - (max_hands - 1) = 1 slot still needs
-    // filling, and the free slot's hand may rank below all of them. Asking
-    // for max_hands would therefore let a frame end with a free slot and an
-    // untracked hand in view. 2*max_hands - 1 is the smallest cap that cannot
-    // starve a free slot this way; it is a tracking-policy number, not a model
-    // parameter (models.md records no max_num_detections).
+    // How many detections the decoder is asked for. This is HEADROOM, not a
+    // necessity -- CORRECTING an earlier rationale here that claimed
+    // max_hands could starve a free slot.
+    //
+    // The starvation argument does not hold. AssignDetectionsToSlots matches
+    // each slot to AT MOST ONE detection, so k live slots can absorb at most
+    // k of the top-scoring detections. With f = max_hands - k free slots,
+    // asking for max_hands = k + f detections leaves at least f unmatched,
+    // which is exactly enough to fill every free slot. max_hands alone
+    // therefore already suffices.
+    //
+    // 2*max_hands - 1 is kept anyway, conservatively: the decoder's cap is
+    // applied to the post-NMS list in descending score order, so extra
+    // entries cost only a few float comparisons in the association loop,
+    // while being one short costs a dropped hand. It also leaves slack for a
+    // future policy that does not discard a matched detection outright (e.g.
+    // one that refreshes a live slot's ROI from it). It is a tracking-policy
+    // number, not a model parameter -- models.md records no
+    // max_num_detections.
     palm_decode_opts_.max_results = 2 * config.max_hands - 1;
 
     // The palm input size is PINNED at 192, not adapted to whatever model is
@@ -332,7 +340,6 @@ class HandTrackerOnnx::Impl {
                        palm_input_.data());
     }
 
-    std::vector<PalmDetection> detections;
     {
       // Ruling T8-A: ScopedStage only. Its destructor calls Metrics::Add,
       // which already increments `calls`; an additional Bump here would make
@@ -348,12 +355,15 @@ class HandTrackerOnnx::Impl {
           palm_session_.Run(Ort::RunOptions{nullptr}, input_names, &input, 1,
                             kPalmOutputs, 2);
 
-      detections = DecodePalmDetections(outputs[0].GetTensorData<float>(),
-                                        outputs[1].GetTensorData<float>(),
-                                        anchors_, palm_decode_opts_);
+      // Out-param form, into a member buffer: the by-value overload would
+      // heap-allocate its result on every frame the detector runs, which
+      // with an empty slot is every frame (ruling T10-D).
+      DecodePalmDetections(outputs[0].GetTensorData<float>(),
+                           outputs[1].GetTensorData<float>(), anchors_,
+                           palm_decode_opts_, detections_);
     }
 
-    if (detections.empty()) return;
+    if (detections_.empty()) return;
 
     // Association runs entirely in FRAME-normalized space (association.hpp,
     // ruling T9-A); DecodePalmDetections reports the detector's 192x192
@@ -361,7 +371,7 @@ class HandTrackerOnnx::Impl {
     // path the frame is never square, so feeding detector-space boxes to
     // AssignDetectionsToSlots would misassociate silently.
     framed_.clear();
-    for (const PalmDetection& d : detections) {
+    for (const PalmDetection& d : detections_) {
       framed_.push_back(PalmToFrameSpace(d, square, aspect));
     }
 
@@ -372,7 +382,6 @@ class HandTrackerOnnx::Impl {
     assoc_slots_.clear();
     for (const Slot& s : slots_) assoc_slots_.push_back(s.t);
 
-    std::vector<int> assignment;
     {
       ScopedStage s(metrics_, Stage::Associate);
       // The REAL frame aspect, never a hardcoded constant (association.hpp).
@@ -386,15 +395,19 @@ class HandTrackerOnnx::Impl {
       // cancelling the moment a rotated rect is passed -- which is precisely
       // what a future change to the association rect would do -- and these
       // frames are 2.67:1, nowhere near square. Pass the real value.
-      assignment = AssignDetectionsToSlots(assoc_slots_, framed_, aspect,
-                                           kDefaultAssociationIou);
+      //
+      // Out-param form, into a member buffer. This block is a MEASURED
+      // stage, so an allocation here is charged to Stage::Associate's
+      // reported time; the by-value overload put exactly one there.
+      AssignDetectionsToSlots(assoc_slots_, framed_, aspect,
+                              kDefaultAssociationIou, assignment_);
     }
 
-    for (std::size_t i = 0; i < assignment.size(); ++i) {
+    for (std::size_t i = 0; i < assignment_.size(); ++i) {
       // Matched to a slot that is already tracking this hand: DISCARD. Using
       // it would stack a second slot onto a hand we already have, and the
       // genuinely untracked hand would never get a slot.
-      if (assignment[i] >= 0) continue;
+      if (assignment_[i] >= 0) continue;
 
       const int free_slot = FirstFreeSlot();
       if (free_slot < 0) break;  // max_hands reached.
@@ -415,6 +428,12 @@ class HandTrackerOnnx::Impl {
       // NextTrackId() (association.hpp), so tracks from different slots and
       // different tracker instances never collide on id.
       slot.t.id = NextTrackId();
+      // `handedness` and `misses` are TrackSlot invariant upkeep, not
+      // inputs to anything in this phase: nothing in cpp/ READS either
+      // field. They are maintained (not deleted) so the struct a future
+      // consumer sees is never stale -- in particular `misses` is NOT a
+      // miss-tolerance mechanism; there is none, a slot dies the first
+      // frame its presence drops below min_presence.
       slot.t.handedness = Handedness::Unknown;
       slot.t.misses = 0;
       slot.t.active = true;
@@ -475,6 +494,9 @@ class HandTrackerOnnx::Impl {
       // slot is dropped -- the other slots' tracks are independent and must
       // survive. The freed slot makes the next frame run the detector again.
       slot.t.active = false;
+      // Invariant upkeep only -- `misses` is written here and read nowhere
+      // in cpp/. It does NOT buy the slot another frame: deactivation is
+      // immediate and unconditional on the first sub-threshold presence.
       ++slot.t.misses;
       return;
     }
@@ -490,6 +512,9 @@ class HandTrackerOnnx::Impl {
     // Tasks 9/10 resolve the label map.
     obs.handedness =
         (handedness_score >= 0.5f) ? Handedness::Right : Handedness::Left;
+    // Invariant upkeep only: no code in cpp/ reads TrackSlot::handedness.
+    // Kept in sync with the emitted observation so the slot never carries a
+    // value contradicting what was reported for the same frame.
     slot.t.handedness = obs.handedness;
     // Confidence in the chosen class, i.e. the distance of the binary score
     // from the 0.5 split, expressed as a probability in [0.5, 1].
@@ -551,10 +576,32 @@ class HandTrackerOnnx::Impl {
   // config.max_hands and never resized, so the cap is structural rather than
   // a comparison someone can forget.
   std::vector<Slot> slots_;
-  // Scratch buffers, members so the detection path allocates nothing after
-  // the first frame.
+  // Scratch buffers for the detection path, members so that after the first
+  // detect frame they are reused at their existing capacity rather than
+  // reallocated. All four are cleared/assigned at the top of each use, so
+  // nothing carries over between frames.
+  //
+  // WHAT STILL ALLOCATES PER FRAME, stated honestly rather than claimed
+  // away (this comment used to assert "allocates nothing after the first
+  // frame", which was false):
+  //
+  //   1. `std::vector<Ort::Value> outputs` in both DetectAndFillFreeSlots
+  //      and RunLandmarksForSlot -- the landmark one once PER HAND, per
+  //      frame. This is inherent to Ort::Session::Run's signature, which
+  //      returns its outputs by value; removing it means switching to the
+  //      pre-allocated-output Run overload, which is a separate change with
+  //      its own correctness surface. Left as is, deliberately.
+  //   2. Inside DecodePalmDetections: its `candidates` vector (reserved to
+  //      the full 2016-anchor count) and the `consumed` std::vector<bool>.
+  //      Those are palm_decode.cpp's internals, not this file's to hoist.
+  //
+  // Everything else on the per-frame path -- the detection list, the
+  // frame-space mapping, the association slot mirror and the assignment
+  // result -- is now allocation-free in steady state.
+  std::vector<PalmDetection> detections_;
   std::vector<PalmDetection> framed_;
   std::vector<TrackSlot> assoc_slots_;
+  std::vector<int> assignment_;
 };
 
 HandTrackerOnnx::HandTrackerOnnx(const HandTrackerConfig& config,

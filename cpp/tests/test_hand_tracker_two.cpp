@@ -22,6 +22,7 @@ using hc_test::DefaultTestConfig;
 using hc_test::LoadRawFixture;
 using hc_test::MirrorX;
 using hc_test::OwnedImage;
+using hc_test::ShiftX;
 using hc_test::SideBySide;
 
 namespace {
@@ -285,6 +286,86 @@ TEST(HandTrackerTwo, DetectorRunsOnlyForTheMissingHand) {
   const std::uint32_t new_right_id = InHalf(obs, /*left=*/false).track_id;
   EXPECT_NE(new_right_id, 0u);
   EXPECT_NE(new_right_id, left_id);
+}
+
+TEST(HandTrackerTwo, AssociationFollowsAMovingHand) {
+  // THE TEST FOR THE PER-FRAME ASSOCIATION-RECT REFRESH.
+  //
+  // RunLandmarksForSlot ends with two assignments: the crop ROI for next
+  // frame, and `slot.t.roi` -- the tight box the association layer compares
+  // against palm detections. Deleting that second line leaves every other
+  // test in this file GREEN, because every other fixture here is a STATIC
+  // image: the rect seeded at detect time and the rect the landmarks would
+  // refresh it to describe the same hand in the same place, so the stale
+  // value scores IoU ~1 and still matches. The refresh is only load-bearing
+  // once the hand MOVES, which is what ShiftX manufactures.
+  //
+  // MEASURED on this exact sequence (frame-normalized boxes in the 1280x480
+  // composite, association gate kDefaultAssociationIou = 0.3):
+  //
+  //   frame 0 seed box (detection)            : [0.0601 0.3879 0.2166 0.5772]
+  //   frame 1 refreshed tight landmark box    : [0.1371 0.2800 0.3008 0.6971]
+  //   frame 2 detection box (hand at +240 px) : [0.2210 0.3496 0.2343 0.6243]
+  //
+  //   IoU(frame-1 refreshed rect, frame-2 detection) = 0.614  -> MATCHES
+  //   IoU(frame-0 seed rect,      frame-2 detection) = 0.134  -> NO MATCH
+  //
+  // 0.314 of margin above the gate with the refresh, 0.166 below it without.
+  // The shift of 120 px per frame was chosen by sweeping dx over
+  // {0,40,60,80,100,120} and reading those IoUs out of the tracker, not
+  // guessed: smaller shifts leave the stale rect still matching (dx=100 gives
+  // 0.193, only 0.107 of margin), larger ones start costing landmark presence
+  // (0.974 at dx=120 frame 2, already falling from 0.991).
+  //
+  // Only the left half ever holds a hand, so with max_hands = 2 the right
+  // slot is permanently empty and the detector fires on EVERY frame (ruling
+  // T10-D) -- which is what gets a frame-2 detection in front of the
+  // association layer at all.
+  constexpr int kShiftPerFrame = 120;
+
+  Metrics m;
+  const auto f = LoadRawFixture("hand_rgb");
+  const auto black = BlackLike(f);
+  const auto frame0 = SideBySide(f, black);
+  const auto frame1 = SideBySide(ShiftX(f, kShiftPerFrame), black);
+  const auto frame2 = SideBySide(ShiftX(f, 2 * kShiftPerFrame), black);
+
+  HandTrackerOnnx t(DefaultTestConfig(/*max_hands=*/2), m);
+  std::vector<HandObservation> obs;
+
+  t.Process(frame0.view, 0, obs);
+  ASSERT_EQ(obs.size(), 1u);
+  const std::uint32_t id = obs[0].track_id;
+  const float x0 = MeanX(obs[0]);
+
+  t.Process(frame1.view, 1, obs);
+  ASSERT_EQ(obs.size(), 1u) << "landmark tracking lost the hand on frame 1";
+  ASSERT_EQ(obs[0].track_id, id);
+  const float x1 = MeanX(obs[0]);
+
+  t.Process(frame2.view, 2, obs);
+
+  // THE ASSERTION. Without the refresh the frame-2 detection scores 0.134
+  // against the frozen frame-0 rect, is declared unmatched, and seeds the
+  // still-free second slot -- so the frame ends with TWO slots stacked on
+  // one hand and a new id alongside the old one.
+  ASSERT_EQ(obs.size(), 1u)
+      << "the moved hand was re-detected as a second, new hand: the "
+         "association rect is not being refreshed from each frame's "
+         "landmarks, so it still describes where the hand was on frame 0";
+  EXPECT_EQ(obs[0].track_id, id)
+      << "the moved hand lost its track id";
+  const float x2 = MeanX(obs[0]);
+
+  // The hand really did move, and stayed inside the left half the whole
+  // time -- otherwise "the right half is blank" would stop being true and
+  // the detection count would change for an unrelated reason.
+  EXPECT_GT(x1, x0 + 0.02f);
+  EXPECT_GT(x2, x1 + 0.02f);
+  EXPECT_LT(x2, 0.5f);
+
+  // Three frames, each entered with the second slot free.
+  EXPECT_EQ(m.Get(Stage::PalmDetect).calls, 3u);
 }
 
 TEST(HandTrackerTwo, NeverExceedsMaxHands) {

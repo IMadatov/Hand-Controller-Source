@@ -33,11 +33,35 @@ namespace hc {
 // signal here. Handedness is a cross-check for a later task, not an input to
 // any function below.
 
-// A single tracked hand slot. `roi` is the RotatedRect the tracker is
-// currently following for this hand, in frame-normalized space (the same
-// convention as TransformRect/CropToFrame use elsewhere). `active` marks
-// whether the slot currently holds a hand; inactive slots are never
-// considered for matching.
+// A single tracked hand slot. `roi` is this hand's current extent in
+// frame-normalized space (the same convention as TransformRect/CropToFrame
+// use elsewhere). `active` marks whether the slot currently holds a hand;
+// inactive slots are never considered for matching.
+//
+// `roi` MUST BE A TIGHT EXTENT, COMMENSURABLE WITH A PalmDetection::box.
+// This is a hard precondition of every function below, not a style note.
+// The only thing `roi` is ever used for here is IoU against a raw palm
+// detection box, and IoU is bounded above by the ratio of the two areas --
+// so a rect that is merely the right SHAPE but the wrong SCALE cannot match
+// even a perfect detection of the very hand it is tracking.
+//
+// In particular, do NOT store the inflated ROI the landmark model is
+// cropped from. That rect is LandmarkRoiOptions/PalmRoiOptions-derived
+// (scaled ~2x and squared on the long side), and Task 10 MEASURED the
+// consequence on the committed fixture: 2.0598 in area against the
+// detection box's 0.1518, giving the TRUE slot/detection pair an IoU of
+// 0.074 -- below kDefaultAssociationIou (0.3), so a correct match was
+// arithmetically impossible and every re-detection stacked a second slot
+// onto an already-tracked hand. The tight 12-point landmark bounding box
+// (MediaPipe's ROI index subset, fingertips excluded) scores 0.557 for the
+// same pair and 0.000 for false pairs. hand_tracker_onnx.cpp keeps the two
+// rects as separate fields for exactly this reason; see TightLandmarkBox
+// there.
+//
+// `roi` MAY carry a non-zero rotation and MUST be interpreted through
+// AxisAlignedBounds (which is what the matchers do). The tracker in this
+// repo happens to store an unrotated rect, but nothing here requires that
+// and the `aspect` argument below is load-bearing the moment it is not.
 struct TrackSlot {
   std::uint32_t id = 0;
   RotatedRect roi{};
@@ -76,15 +100,26 @@ constexpr std::size_t kMaxAssociationEntries = 64;
 // enforce one-detection-per-slot across a batch -- see
 // AssignDetectionsToSlots for that.
 //
+// `slots[i].roi` must satisfy the tight-extent precondition documented on
+// TrackSlot; a slot carrying an inflated tracking crop will fail to match
+// the very detection it should match.
+//
 // `aspect` is frame width / frame height and MUST be the real frame's
-// aspect; it is not a free choice. A TrackSlot's roi is rotated --
-// RoiFromPalm derives the rotation from palm keypoints, so it is
-// essentially never 0 -- and rotating a rect at the wrong aspect does not
-// merely rescale its axis-aligned hull, it produces a geometrically
-// different hull, shifting the IoU by roughly 10% on a 16:9 frame. Only
-// slot.roi passes through AxisAlignedBounds; d.box is already axis-aligned
-// and carries no aspect dependence, so there is no "both boxes scale
-// together" invariance available to excuse a hardcoded aspect here.
+// aspect; it is not a free choice. A TrackSlot's roi MAY be rotated, and
+// rotating a rect at the wrong aspect does not merely rescale its
+// axis-aligned hull, it produces a geometrically different hull, shifting
+// the IoU by roughly 10% on a 16:9 frame (test_association.cpp's
+// RotatedSlotUsesTheFrameAspectAtBothCallSites pins a case where the two
+// aspects give OPPOSITE match decisions). Only slot.roi passes through
+// AxisAlignedBounds; d.box is already axis-aligned and carries no aspect
+// dependence, so there is no "both boxes scale together" invariance
+// available to excuse a hardcoded aspect here.
+//
+// At rotation exactly 0 the aspect does cancel out of AxisAlignedBounds
+// (it multiplies the x half-extent then divides it back), so passing the
+// wrong value is harmless for an unrotated roi -- which is the case this
+// repo's only production caller happens to be in. That is an accident of
+// the current caller, not a property of this API: pass the real value.
 int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
                           const PalmDetection& d, float aspect,
                           float iou_threshold);
@@ -101,6 +136,19 @@ int MatchSlotForDetection(const std::vector<TrackSlot>& slots,
 //
 // Only the first kMaxAssociationEntries slots and the first
 // kMaxAssociationEntries detections are considered; see that constant.
+//
+// Out-param overload: writes the same result into `out` instead of
+// returning a fresh vector. `out` is assigned (not appended to), so its
+// prior contents are irrelevant and only its CAPACITY is reused. This
+// exists because the by-value form's one surviving allocation sits inside
+// the tracker's Stage::Associate timing window, i.e. it was being charged
+// to a measured number. The by-value overload is a thin wrapper around
+// this one, so the two cannot drift.
+void AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
+                             const std::vector<PalmDetection>& dets,
+                             float aspect, float iou_threshold,
+                             std::vector<int>& out);
+
 std::vector<int> AssignDetectionsToSlots(const std::vector<TrackSlot>& slots,
                                          const std::vector<PalmDetection>& dets,
                                          float aspect, float iou_threshold);
