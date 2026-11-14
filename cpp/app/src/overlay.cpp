@@ -40,9 +40,12 @@ struct Bgr {
 // and grow without bound, so the lookup wraps; with two hands on screen at a
 // time, two adjacent ids only ever collide after a wrap, and even then the
 // entries are far enough apart in hue to stay distinguishable.
+// Values are B, G, R -- the order OpenCV draws in, not RGB. Naming these
+// from the RGB reading is how the first two entries came to be commented as
+// their own opposites.
 constexpr Bgr kTrackColors[] = {
-    {255, 128, 0},    // orange
-    {0, 220, 255},    // yellow
+    {255, 128, 0},    // azure
+    {0, 220, 255},    // orange
     {0, 200, 0},      // green
     {255, 0, 200},    // magenta
     {80, 80, 255},    // red
