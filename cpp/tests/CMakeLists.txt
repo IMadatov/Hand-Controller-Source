@@ -68,4 +68,8 @@ if(HC_BUILD_APP)
   target_compile_definitions(test_opencv_frame_source PRIVATE
     HC_TEST_TMP_DIR="${HC_TEST_TMP_DIR}"
   )
+
+  # Only DrawObservations is covered. Overlay::Render needs a display and is
+  # exercised by Task 14's manual run instead.
+  hc_add_test(test_overlay test_overlay.cpp LIBS hc_app)
 endif()

@@ -6,6 +6,7 @@
 # arrives in Task 14.
 add_library(hc_app STATIC
   src/opencv_frame_source.cpp
+  src/overlay.cpp
 )
 
 # PUBLIC: test and app targets that link hc_app include its headers by plain
