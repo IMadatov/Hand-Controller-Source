@@ -72,4 +72,9 @@ if(HC_BUILD_APP)
   # Only DrawObservations is covered. Overlay::Render needs a display and is
   # exercised by Task 14's manual run instead.
   hc_add_test(test_overlay test_overlay.cpp LIBS hc_app)
+
+  # Argument parsing only. main() itself is not linked here -- ParseCli lives
+  # in its own translation unit precisely so the tests can reach it without
+  # pulling in a second main().
+  hc_add_test(test_cli test_cli.cpp LIBS hc_app)
 endif()
