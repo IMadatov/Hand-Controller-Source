@@ -32,6 +32,10 @@ hc_add_test(test_roi test_roi.cpp LIBS hc_core)
 hc_add_test(test_association test_association.cpp LIBS hc_core)
 hc_add_test(test_frame_source test_frame_source.cpp LIBS hc_core)
 
+# Phase 2. Pure core: no OpenCV, no OS, so these build and run with
+# -DHC_BUILD_APP=OFF like everything else in hc_core.
+hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_core)
+
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_core)
 # The tracker tests are the only ones that touch real model files and the
 # committed image fixture, so the paths are injected here rather than being

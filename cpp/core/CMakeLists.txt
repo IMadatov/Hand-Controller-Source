@@ -6,6 +6,7 @@ add_library(hc_core STATIC
   src/palm_decode.cpp
   src/roi.cpp
   src/hand_tracker_onnx.cpp
+  src/hand_features.cpp
   src/association.cpp
   src/synthetic_frame_source.cpp
   src/latest_frame_source.cpp
