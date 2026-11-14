@@ -20,8 +20,18 @@ include(cmake/FetchModels.cmake)
 # from source is a slow first configure and nothing before Task 12 needs it.
 option(HC_BUILD_APP "Build the OpenCV-based application target" ON)
 
+# Must come after the option above, since the whole file is a no-op when
+# HC_BUILD_APP is OFF. Defines hc::opencv when it is ON.
+include(cmake/FetchOpenCV.cmake)
+
 add_subdirectory(tools)
 add_subdirectory(core)
+
+# The OpenCV-dependent layer. Guarded so that a core-only configure
+# (-DHC_BUILD_APP=OFF) builds no OpenCV and links none.
+if(HC_BUILD_APP)
+  add_subdirectory(app)
+endif()
 
 enable_testing()
 add_subdirectory(tests)

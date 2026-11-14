@@ -54,3 +54,18 @@ target_compile_definitions(test_hand_tracker_two PRIVATE
   HC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 target_include_directories(test_hand_tracker_two PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Tests for the app layer. Guarded, because the app layer and OpenCV only
+# exist when HC_BUILD_APP is ON; with it OFF this whole block is skipped and
+# the suite stays buildable with no OpenCV anywhere.
+if(HC_BUILD_APP)
+  # A scratch directory under the build tree for tests that generate media
+  # files, so nothing is written into the source tree.
+  set(HC_TEST_TMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp")
+  file(MAKE_DIRECTORY "${HC_TEST_TMP_DIR}")
+
+  hc_add_test(test_opencv_frame_source test_opencv_frame_source.cpp LIBS hc_app)
+  target_compile_definitions(test_opencv_frame_source PRIVATE
+    HC_TEST_TMP_DIR="${HC_TEST_TMP_DIR}"
+  )
+endif()
