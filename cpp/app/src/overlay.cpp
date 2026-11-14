@@ -168,15 +168,30 @@ void Overlay::Render(const ImageView& frame, const std::vector<HandObservation>&
   if (key == 27 || key == 'q') quit_ = true;
 }
 
+bool WindowClosed(double visible_prop, bool was_visible) {
+  // Negative means the backend does not implement WND_PROP_VISIBLE. The GTK
+  // build used here returns -1 unconditionally, so a `< 1.0` test reports
+  // "closed" on the very first frame and the loop exits after one iteration.
+  // Unsupported is not closed: say no, and let the key be the quit route.
+  if (visible_prop < 0.0) return false;
+
+  // Supported, but the window has not been mapped yet. Creating a window and
+  // asking the same instant whether it is visible is a race, not a close.
+  if (!was_visible) return false;
+
+  return visible_prop < 1.0;
+}
+
 bool Overlay::ShouldQuit() {
   if (quit_) return true;
   if (!created_) return false;
 
   // The title-bar close button delivers no key, so the window's own
-  // visibility is the second half of the condition. This pairing is carried
-  // over from the Python version, where it was the one thing about the
-  // preview window that behaved correctly.
-  return cv::getWindowProperty(title_, cv::WND_PROP_VISIBLE) < 1.0;
+  // visibility is the second half of the condition -- where the backend
+  // supports reporting it.
+  const double visible = cv::getWindowProperty(title_, cv::WND_PROP_VISIBLE);
+  if (visible >= 1.0) was_visible_ = true;
+  return WindowClosed(visible, was_visible_);
 }
 
 }  // namespace hc

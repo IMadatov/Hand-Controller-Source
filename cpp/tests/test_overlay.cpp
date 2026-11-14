@@ -136,6 +136,34 @@ TEST(Overlay, HandlesWildlyOutOfRangeLandmarksWithoutCrashing) {
   EXPECT_NO_FATAL_FAILURE(DrawObservations(bgr, std::vector<HandObservation>{obs}));
 }
 
+// Regression tests for a bug found only by running the app against a real
+// camera: the preview window quit after exactly one frame.
+//
+// cv::getWindowProperty(WND_PROP_VISIBLE) returns -1 on this OpenCV build
+// because the trimmed GTK backend does not implement the property. The
+// original check was `prop < 1.0`, which -1 satisfies, so every frame
+// reported "window closed". Render/ShouldQuit have no end-to-end test (they
+// need a display), so this pins the decision itself.
+TEST(Overlay, UnsupportedVisibilityPropertyIsNotAClose) {
+  EXPECT_FALSE(hc::WindowClosed(-1.0, /*was_visible=*/false));
+  EXPECT_FALSE(hc::WindowClosed(-1.0, /*was_visible=*/true));
+}
+
+TEST(Overlay, WindowNotYetMappedIsNotAClose) {
+  // Supported property, but the compositor has not mapped the window yet.
+  // Reading that as a close is the same one-frame-exit bug by another route.
+  EXPECT_FALSE(hc::WindowClosed(0.0, /*was_visible=*/false));
+}
+
+TEST(Overlay, VisibleWindowIsNotClosed) {
+  EXPECT_FALSE(hc::WindowClosed(1.0, /*was_visible=*/true));
+}
+
+TEST(Overlay, WindowThatWasVisibleAndIsNoLongerIsClosed) {
+  // The actual close: seen visible, now reported not visible.
+  EXPECT_TRUE(hc::WindowClosed(0.0, /*was_visible=*/true));
+}
+
 // Track ids are not indices: they come from the tracker's monotonic counter
 // and grow without bound, so the colour lookup has to wrap rather than index
 // a palette directly.

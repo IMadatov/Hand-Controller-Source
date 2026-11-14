@@ -27,6 +27,20 @@ namespace hc {
 // is the whole reason it is a free function rather than a private method.
 void DrawObservations(cv::Mat& bgr, const std::vector<HandObservation>& obs);
 
+// Decides whether the preview window has been closed by the user, given the
+// value OpenCV's getWindowProperty(WND_PROP_VISIBLE) returned and whether the
+// window has ever been seen visible.
+//
+// Split out as a free function because it is the one piece of Overlay's quit
+// logic that can be tested without a display -- and it is the piece that was
+// wrong: a NEGATIVE `visible_prop` means the backend does not implement the
+// property at all, which is what the trimmed GTK build here returns (-1 on
+// every call). Treating that as "not visible" quits after a single frame.
+//
+// `was_visible` guards the other end: a window that has just been created is
+// legitimately not visible yet, and must not be read as closed.
+bool WindowClosed(double visible_prop, bool was_visible);
+
 // The debug preview window. Along with the frame sources, this is the only
 // part of the project allowed to touch OpenCV's UI; the pipeline must run
 // fully headless with this class absent, so nothing else may depend on it.
@@ -50,12 +64,18 @@ class Overlay {
   // True once the user has asked to quit: Escape or 'q' pressed, or the
   // window closed. Both conditions matter -- a window closed by its title-bar
   // button never delivers a key, and waitKey never reports the close.
+  //
+  // Where the backend does not report visibility (see WindowClosed), the key
+  // is the only quit route and closing the window will not stop the loop.
   bool ShouldQuit();
 
  private:
   std::string title_;
   bool created_ = false;
   bool quit_ = false;
+  // Latched once the window is observed visible, so the gap between creating
+  // the window and the compositor mapping it is not mistaken for a close.
+  bool was_visible_ = false;
 };
 
 }  // namespace hc
