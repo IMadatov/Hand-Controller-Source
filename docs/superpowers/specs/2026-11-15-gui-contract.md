@@ -131,25 +131,33 @@ So the GUI holding resolution, detection threshold and panic hotkey in its own
 store and writing them nowhere is correct today — but it should not present
 them as engine settings that persist, because they do not.
 
-### Q3 — the session is still Wayland, and Task 9 is still blocked
+### Q3 — still Wayland, but injection now WORKS (updated 2026-11-15, later)
 
-Confirmed, and it is measured rather than assumed: the probe is committed as
-`cpp/tools/xtest_probe.cpp` and still prints
+The GUI session's reading was right about XTest, and the probe still prints
+`RESULT: XTest SILENTLY DID NOTHING`. But the conclusion has changed, so read
+this rather than the earlier answer:
 
-```
-RESULT: XTest SILENTLY DID NOTHING (returned success, no move)
-```
+**Injection works on Linux now, through `/dev/uinput`.** X11 turned out to be
+unreachable on this machine at all (Ubuntu 26.04 / GNOME 50 ships no Xorg
+session), so instead of a display protocol the sink asks the KERNEL to create
+a virtual input device. The compositor routes its events like any mouse. It
+works on Wayland and X11 alike, and the cursor was observed to move.
 
-`XDG_SESSION_TYPE=wayland`. The plan's assumption that the owner switches to
-X11 has not happened. **The GUI session's reading is right: a Task 9 test that
-reads the pointer back is supposed to fail here, and that failure is the
-finding, not a bug to fix.**
+Three consequences for the GUI, and the first two are new:
 
-What this means for the GUI: "engine running" must not be rendered from the
-fact that commands were dispatched. Sink availability is reported by the sink's
-`Create()`, and unavailability is a visible state (`input injection
-unavailable`), never swallowed. A UI that shows a green light while XTest
-silently discards every event is worse than one that shows nothing.
+1. **A permission state exists, and it is the common failure.** `/dev/uinput`
+   is root-only by default, so the sink refuses to start until a one-time udev
+   rule is applied. The GUI must render this as its own distinguishable state
+   with the fix shown — not as "engine broken". The engine returns the exact
+   shell commands in the error string; show them verbatim.
+2. **There is a ~400 ms startup wait** before injection is live, because the
+   compositor has not discovered the device before then. If Start() appears
+   instant and the first gestures do nothing, that is this window, not a bug.
+3. **Unchanged, and still the important one:** "engine running" must not be
+   rendered from the fact that commands were dispatched. `SinkAvailable()`
+   answers whether the sink can deliver, and a UI showing a green light while
+   events are discarded is worse than one showing nothing. See §2 point 4 on
+   why available ≠ injecting.
 
 ---
 

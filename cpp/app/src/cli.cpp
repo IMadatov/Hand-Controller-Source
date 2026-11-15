@@ -80,6 +80,7 @@ const char* SinkKindName(SinkKind sink) {
   switch (sink) {
     case SinkKind::Null: return "null";
     case SinkKind::Log: return "log";
+    case SinkKind::Uinput: return "uinput";
     case SinkKind::XTest: return "xtest";
     case SinkKind::SendInput: return "sendinput";
   }
@@ -130,13 +131,16 @@ std::string CliUsage() {
       "    --bindings PATH   gesture bindings file (default: compiled-in)\n"
       "    --sensitivity F   cursor speed multiplier, > 0 (overrides the file)\n"
       "    --smoothing F     cursor smoothing, 0..1 (overrides the file)\n"
-      "    --sink NAME       null | log | xtest | sendinput (default: null)\n"
+      "    --sink NAME       null | log | uinput | xtest | sendinput\n"
+      "                      (default: null)\n"
       "    --no-inject       force the null sink, whatever --sink says\n"
       "\n"
-      "  The default sink is null: nothing is injected unless you ask. On a\n"
-      "  Wayland session XTest reports success and moves nothing, so --sink\n"
-      "  xtest is only meaningful under X11. --sink sendinput is Windows\n"
-      "  only, and has never been run by anyone.\n"
+      "  The default sink is null: nothing is injected unless you ask.\n"
+      "  --sink uinput is the one that works on Linux, Wayland included: it\n"
+      "  creates a virtual input device in the kernel. It needs one-time\n"
+      "  access to /dev/uinput, and says how if it does not have it.\n"
+      "  --sink xtest is X11 only and silently does nothing under Wayland.\n"
+      "  --sink sendinput is Windows only and has never been run by anyone.\n"
       "\n"
       "  Output:\n"
       "    --headless        no preview window\n"
@@ -227,12 +231,14 @@ bool ParseCli(int argc, char** argv, CliOptions& out, std::string& error) {
         opts.sink = SinkKind::Null;
       } else if (value == "log") {
         opts.sink = SinkKind::Log;
+      } else if (value == "uinput") {
+        opts.sink = SinkKind::Uinput;
       } else if (value == "xtest") {
         opts.sink = SinkKind::XTest;
       } else if (value == "sendinput") {
         opts.sink = SinkKind::SendInput;
       } else {
-        error = "--sink must be null, log, xtest or sendinput, got \"" +
+        error = "--sink must be null, log, uinput, xtest or sendinput, got \"" +
                 value + "\"";
         return false;
       }

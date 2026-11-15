@@ -137,7 +137,7 @@ that way and say so.
 | `--bindings PATH` | Gesture bindings file (default: the compiled-in one) |
 | `--sensitivity F` | Cursor speed multiplier, > 0; overrides the file |
 | `--smoothing F` | Cursor smoothing, 0..1; overrides the file |
-| `--sink NAME` | `null`, `log`, `xtest` or `sendinput` (default: **`null`**) |
+| `--sink NAME` | `null`, `log`, `uinput`, `xtest` or `sendinput` (default: **`null`**) |
 | `--no-inject` | Force the null sink, whatever `--sink` says |
 | `--headless` | No preview window |
 | `--report PATH` | Also write the timing report to PATH |
@@ -176,6 +176,43 @@ hostile to the person writing it. `--sink log` prints what the gestures *would*
 have done. `--no-inject` forces null over an explicit `--sink`, in either order
 on the command line.
 
+### On Linux, use `--sink uinput`
+
+It is the one backend **verified to actually inject** on this machine, and it
+works on Wayland and X11 alike, because it involves no display protocol at
+all: it asks the kernel to create a virtual input device, and the compositor
+routes its events like any mouse or keyboard.
+
+One-time setup, because `/dev/uinput` is root-only by default:
+
+```bash
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+  | sudo tee /etc/udev/rules.d/99-hand-controller-uinput.rules
+sudo usermod -aG input "$USER"
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The group change takes effect in a new login session. Without it the sink
+refuses to start and prints exactly the above — an error that does not say how
+to fix it is half an error. To use it in the current shell without logging out:
+
+```bash
+sudo -u "$USER" -g input ./cpp/build-app/bin/hand_controller --sink uinput
+```
+
+Verify it independently, by eye, before trusting it:
+
+```bash
+./cpp/build/tools/uinput_probe   # reads its own evdev node back, then moves the cursor
+```
+
+Two things worth knowing. Motion goes through libinput's **pointer
+acceleration**, so the pixels travelled are not exactly the pixels asked for —
+`--sensitivity` is the knob, and absolute positioning (which would bypass it)
+would need a tablet-style device and is not done. And the sink appears in
+`libinput list-devices` as *hand-controller virtual input*, deliberately: a
+program injecting input should be visible as the one doing it.
+
 ### Wayland: XTest reports success and does nothing
 
 > On a **Wayland** session, `XTestFakeMotionEvent` returns success and the
@@ -195,11 +232,18 @@ pointer after:  1920,540
 RESULT: XTest SILENTLY DID NOTHING (returned success, no move)
 ```
 
-Consequently **`--sink xtest` is not built yet** and refuses with that
-explanation rather than pretending: a sink that reports success while moving
-nothing is the exact failure this project is trying not to ship. Real X11
-injection needs an X11 session; Wayland needs `libei`, which is a larger piece
-of work and out of scope.
+Consequently **`--sink xtest` is not built** and refuses with that explanation
+rather than pretending: a sink that reports success while moving nothing is the
+exact failure this project is trying not to ship. `--sink uinput` above is what
+replaced it, and it covers X11 too — which is why XTest is now unlikely ever to
+be worth writing.
+
+Note also that **X11 is not reachable on this machine at all**: Ubuntu 26.04
+ships GNOME 50, which dropped the Xorg session, so `/usr/share/xsessions` does
+not exist and the display manager offers Wayland only. `libei` remains the
+"correct" Wayland answer and is still out of scope — it needs a system library
+the project's build rules forbid, plus a portal permission dialog, and uinput
+reaches the same result with neither.
 
 ### The bindings file
 
@@ -278,6 +322,11 @@ Gesture recognition, mapping and dispatch together cost **~0.0013 ms per
 frame** with two hands — about 0.01% of the tracker. Re-measure with
 `cpp/build/tools/bench_control`.
 
+The `uinput` sink pays two one-off waits, both on purpose and neither per
+frame: 400 ms at startup, before which the compositor has not discovered the
+new device and events go nowhere, and 30 ms at shutdown, so released keys are
+consumed before the device they belong to disappears.
+
 ## Platform support
 
 A platform counts as supported here only once the build has actually been
@@ -285,16 +334,16 @@ configured, compiled and run on it. By that standard:
 
 | Platform | Status |
 |---|---|
-| Linux x64 | **Verified.** Everything above was built and run here |
+| Linux x64 | **Verified.** Everything above was built and run here, including input injection through `--sink uinput` — the cursor was observed to move on a Wayland session |
 | Windows x64 | **Untested.** The CMake exists and is believed correct — `cmake/FetchOnnxRuntime.cmake` selects the hash-pinned `win-x64` ONNX Runtime archive — but it has never been configured, compiled or run. No Windows machine was available. The `SendInput` sink behind `--sink sendinput` is written and reachable, and has **never been compiled**: the whole file sits behind `#ifdef _WIN32`, so on Linux not even the compiler has read it. There is deliberately no test for it |
 | macOS | **Absent.** `FetchOnnxRuntime.cmake` has no `osx` branch at all. Adding one is an archive URL, a SHA256 and an `elseif`; it is cheap but it has not been done |
 | Android / iOS | **Not attempted.** C++17 was chosen for NDK compatibility and ONNX Runtime ships for both, so `hc_base`, `hc_vision` and `hc_vision_ort` should port. Frame acquisition (CameraX, AVFoundation) and rendering have no OpenCV path and would be new `hc_platform` implementations |
 
 The portable layers carry no platform-specific code to port — that is the
 point of the split. Divergence is concentrated in `platform/`, and grows when
-the phase 2 injection tasks land: `SendInput` on Windows (written, never run),
-X11/XTest on Linux (blocked — see the Wayland note above), `CGEvent` on
-macOS (not started). Note that input injection does not exist on iOS at all,
+the phase 2 injection tasks land: `uinput` on Linux (**works, verified**),
+`SendInput` on Windows (written, never run), X11/XTest (abandoned — uinput
+covers X11 as well), `CGEvent` on macOS (not started). Note that input injection does not exist on iOS at all,
 and on Android only through a user-granted `AccessibilityService`.
 
 ## Notes for this machine

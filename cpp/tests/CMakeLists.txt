@@ -121,4 +121,17 @@ if(HC_BUILD_APP)
   # Only DrawObservations is covered. Overlay::Render needs a display and is
   # exercised by Task 14's manual run instead.
   hc_add_test(test_overlay test_overlay.cpp LIBS hc_platform)
+
+  # The uinput sink, Linux only. Every case here reads the virtual device's
+  # own evdev node back, so these are measurements rather than assertions that
+  # a write returned -- the distinction XTest's silent failure taught.
+  #
+  # They SKIP when /dev/uinput is not accessible, which is the default on a
+  # fresh machine. A skipped run means UNVERIFIED, not passed; to run them for
+  # real after granting access:
+  #
+  #   sudo -u "$USER" -g input ./cpp/build-app/bin/test_uinput_sink
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    hc_add_test(test_uinput_sink test_uinput_sink.cpp LIBS hc_platform)
+  endif()
 endif()

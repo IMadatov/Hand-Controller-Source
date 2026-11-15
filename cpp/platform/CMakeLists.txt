@@ -19,6 +19,10 @@ add_library(hc_platform STATIC
   # anyway, because a source file excluded by CMake is a file nobody
   # remembers exists.
   src/sendinput_sink.cpp
+  # Linux only, behind #ifdef __linux__ for the same reason. This is the one
+  # injection backend verified to actually work on the development machine --
+  # see uinput_sink.hpp for why it is uinput and not XTest.
+  src/uinput_sink.cpp
 )
 
 # PUBLIC: targets linking hc_platform include its headers by plain name

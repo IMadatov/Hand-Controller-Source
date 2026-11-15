@@ -6,8 +6,10 @@ Plan: `docs/superpowers/plans/2026-11-14-hand-controller-cpp-phase2.md`
 
 Phase 2 built the three layers above the phase 1 tracker — gesture
 recognition, action mapping, output injection — plus the module split they
-landed on. **Eleven of the plan's twelve tasks are done. Task 9 (the X11 sink)
-is blocked and should stay blocked**; see below.
+landed on. **All twelve of the plan's tasks are addressed, and Linux input
+injection works** — though not the way Task 9 said it would: XTest was
+abandoned for `/dev/uinput`, which is verified to move the cursor on this
+Wayland session. See "Task 9 was replaced, not completed" below.
 
 263 tests pass in the core-only configure, 288 with the application. ASan
 clean (with the documented ORT-leak split), TSan clean on both threaded
@@ -34,7 +36,7 @@ coverage.
 | 6 `ActionMapper` | done | `control/src/action_mapper.cpp` |
 | 7 Sink interface, null + logging | done | `control/` — not `platform/`, see below |
 | 8 Dispatch queue | done | `control/src/queued_sink.cpp` |
-| **9 X11 / XTest sink** | **BLOCKED** | nothing written; `tools/xtest_probe.cpp` is why |
+| **9 X11 / XTest sink** | **replaced by uinput, and it works** | `platform/src/uinput_sink.cpp`, `tools/uinput_probe.cpp` |
 | 10 Windows `SendInput` | written, **never compiled** | `platform/src/sendinput_sink.*` |
 | 11 Application shell | done, as `Controller` | `control/src/controller.cpp`, `app/src/main.cpp` |
 | 12 HUD, docs, measurements | done | `platform/src/overlay.cpp`, `README.md`, this report |
@@ -78,28 +80,84 @@ release out of four.
 
 ---
 
-## Task 9 is blocked, and the block is a finding
+## Task 9 was replaced, not completed
 
-`XDG_SESSION_TYPE=wayland`. XTest reports its extension present at version
-2.2, `libXtst.so.6` is installed, `XTestFakeMotionEvent` returns success — and
-the cursor does not move. Every signal short of reading the pointer back says
-it works.
+The plan offered two ways out of the Wayland block: switch the session to X11,
+or target Wayland through `libei`. **The first turned out to be impossible on
+this machine** — Ubuntu 26.04 ships GNOME 50, which dropped the Xorg session
+entirely: `/usr/share/xsessions` does not exist and the display manager offers
+Wayland only. The plan's "the owner has chosen to switch to X11" was not a
+choice anyone could make here.
 
-The probe is committed (`cpp/tools/xtest_probe.cpp`), so this is repeatable
-rather than a claim. It still prints `RESULT: XTest SILENTLY DID NOTHING` as
-of this date.
+A third route the plan did not consider turned out to be the right one.
+**`/dev/uinput`** asks the KERNEL to create a virtual input device, so the
+compositor sees events arrive as if from hardware and routes them like any
+mouse. No display protocol is involved, which is why it works on Wayland and
+X11 alike — and unlike `libei` it needs nothing linked, since `open`, `ioctl`
+and `write` are libc. The project forbids build-time system dependencies, so
+that was decisive.
 
-`--sink xtest` is therefore accepted by the parser and **refused at
-construction**, naming the probe and the reason. Shipping a sink that returns
-success while moving nothing is the precise failure this project exists to
-avoid, and a half-written one would have passed every test that did not read
-the real pointer.
+Verified the same way XTest was disproved, and in the same order — probe
+first, sink second:
 
-Two ways forward, and the choice is the owner's: log into an X11 session and
-re-run the probe until it prints `ACTUALLY MOVES`, or target Wayland properly
-through `libei` — note the running XWayland already carries
-`-enable-ei-portal`. The second is a larger piece of work than Task 9 and was
-explicitly out of phase 2 scope.
+```
+$ ./cpp/build/tools/uinput_probe
+open(/dev/uinput): ok
+UI_DEV_CREATE: ok, device named "hand-controller probe"
+found our evdev node: /dev/input/event23
+kernel round-trip: EVENT WAS EMITTED (read back from evdev)
+RESULT: the kernel accepted and emitted our events.
+```
+
+and the owner confirmed the cursor visibly moved. **That second half cannot be
+automated on Wayland** — the cursor position is not readable, which is exactly
+what made XTest's failure invisible — so the probe performs a large, reversed,
+deliberately obvious movement and asks. An honest "look at the screen" beats a
+check that cannot fail.
+
+`UinputSink`'s own 16 tests are not that, though: each one reads the virtual
+device's **own evdev node** back, so "the kernel accepted and emitted this
+event" is measured per case. They SKIP when `/dev/uinput` is inaccessible,
+which is the default, and a skipped run means UNVERIFIED rather than passed:
+
+```bash
+sudo -u "$USER" -g input ./cpp/build-app/bin/test_uinput_sink   # 16/16 here
+```
+
+### Three things this route taught that XTest would not have
+
+**1. Sub-pixel motion has to be accumulated or the cursor never moves at all.**
+`REL_X` is an integer; smoothing makes most frames' deltas a fraction of a
+pixel; truncating each frame independently discards every fraction. XTest
+positioned absolutely and had no such failure mode, so this is a bug the port
+*introduced* — and `SubPixelMotionAccumulatesInsteadOfVanishing` is the test
+that pins it. Truncation is symmetric rather than floored, too, or every
+leftward frame would bias by a pixel and the cursor would crawl.
+
+**2. There is a startup window where injection silently goes nowhere.** The
+kernel creates the device immediately, but udev and the compositor discover it
+asynchronously, and anything written before libinput opens the node reaches
+nobody. 400 ms is paid once in `Create`. This is a silent failure of precisely
+the XTest kind, arrived at from the opposite direction.
+
+**3. Destroying the device revokes every reader's buffered events.** A key-up
+written microseconds before `UI_DEV_DESTROY` reaches nobody, and draining the
+node afterwards reports nothing even though the write happened — which reads
+exactly like a stuck key and is not one. The destructor now waits 30 ms
+between releasing and destroying, and the test proves it from a CONCURRENT
+reader, which is what libinput actually is.
+
+### Remaining limitations, recorded rather than fixed
+
+- **Pointer acceleration applies.** libinput runs relative motion through the
+  user's acceleration curve, so pixels travelled are not pixels asked for.
+  `--sensitivity` is the knob. Bypassing it would mean an absolute,
+  tablet-style device — more complexity for a cosmetic gain.
+- **`--sink xtest` stays unwritten**, and is now unlikely ever to be worth
+  writing: uinput covers X11 as well.
+- **One-time `sudo` is required** for the udev rule granting `/dev/uinput`
+  access. That is the machine owner's decision and the program only prints the
+  rule; it does not arrange its own privileges.
 
 ---
 
@@ -129,7 +187,9 @@ that matters, exactly as phase 1 found.
 
 ## What phase 3 inherits
 
-- **Task 9**, when there is an X11 session or a `libei` decision.
+- **Nothing on injection, on Linux.** That was the open item and it is closed:
+  `--sink uinput` works, verified. macOS (`CGEvent`) is untouched and Windows
+  is written but never compiled.
 - **The `extern "C"` shim over `Controller`**, which is what would unlock .NET
   P/Invoke, Flutter FFI and mobile from one artifact. Deliberately not written
   before now, because there was nothing stable to wrap; `Controller` is that

@@ -23,6 +23,7 @@
 #include "opencv_frame_source.hpp"
 #include "overlay.hpp"
 #include "sendinput_sink.hpp"
+#include "uinput_sink.hpp"
 
 #include "hc/bindings.hpp"
 #include "hc/controller.hpp"
@@ -127,6 +128,45 @@ std::unique_ptr<hc::IOutputSink> MakeSink(const hc::CliOptions& opts) {
       return std::make_unique<hc::QueuedSink>(
           std::make_unique<hc::LoggingSink>(&std::cout), kSinkQueueCapacity);
 
+    case hc::SinkKind::Uinput: {
+#ifdef __linux__
+      // The one backend verified to inject on this machine. Queued, because a
+      // write to a device node can block and the frame loop must not.
+      //
+      // The screen size is read from /sys/class/drm rather than from a display
+      // server: this sink deliberately talks to none, and asking Wayland for a
+      // resolution would reintroduce the protocol dependency it exists to
+      // avoid. A guess is used if that fails, and SAID OUT LOUD, because a
+      // wrong one makes the cursor the wrong speed and nothing else.
+      int width = 1920;
+      int height = 1080;
+      if (!hc::DetectScreenSize(width, height)) {
+        std::cerr << "warning: could not read a screen size from "
+                     "/sys/class/drm; assuming "
+                  << width << "x" << height
+                  << ". Cursor speed will be off; use --sensitivity.\n";
+      }
+
+      std::string sink_error;
+      auto device = hc::UinputSink::Create(width, height, sink_error);
+      if (!device) {
+        std::cerr << "error: " << sink_error << "\n";
+        return nullptr;
+      }
+      std::cout << "uinput device: " << hc::UinputSink::DeviceName();
+      if (!device->DeviceNode().empty()) {
+        std::cout << " at " << device->DeviceNode();
+      }
+      std::cout << "\n";
+
+      return std::make_unique<hc::QueuedSink>(std::move(device),
+                                              kSinkQueueCapacity);
+#else
+      std::cerr << "error: --sink uinput is Linux only.\n";
+      return nullptr;
+#endif
+    }
+
     case hc::SinkKind::SendInput:
 #ifdef _WIN32
       // Written blind and never run by anyone -- see sendinput_sink.hpp. It is
@@ -171,7 +211,8 @@ std::string SinkStatus(const hc::CliOptions& opts,
   const std::string name = hc::SinkKindName(kind);
 
   if (!controller.SinkAvailable()) return name + " (UNAVAILABLE)";
-  if (kind == hc::SinkKind::XTest || kind == hc::SinkKind::SendInput) {
+  if (kind == hc::SinkKind::Uinput || kind == hc::SinkKind::XTest ||
+      kind == hc::SinkKind::SendInput) {
     return name + ", injecting input";
   }
   return name + ", no input injection";
