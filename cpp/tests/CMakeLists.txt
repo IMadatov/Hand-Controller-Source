@@ -58,6 +58,12 @@ hc_add_test(test_action_mapper test_action_mapper.cpp LIBS hc_control)
 hc_add_test(test_output_sink test_output_sink.cpp LIBS hc_control)
 hc_add_test(test_queued_sink test_queued_sink.cpp LIBS hc_control)
 
+# The whole chain joined up -- frame source, tracker, recognizer, mapper,
+# sink -- driven through a SCRIPTED tracker, so it needs no model, no camera
+# and no display, and a failure names the wiring rather than the inference.
+hc_add_test(test_controller test_controller.cpp LIBS hc_control)
+target_include_directories(test_controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # hc_vision_ort — the ONNX Runtime backend, and the only tests that load
 # real model files.
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)
@@ -91,6 +97,12 @@ target_include_directories(test_hand_tracker_two PRIVATE ${CMAKE_CURRENT_SOURCE_
 # main() itself is not linked here -- ParseCli lives in its own translation
 # unit precisely so the tests can reach it without pulling in a second main().
 hc_add_test(test_cli test_cli.cpp LIBS hc_cli)
+# ReadTextFile needs a file it can actually open; the shipped configuration is
+# the one file guaranteed to be there, and its path comes from the build rather
+# than from a guess about the working directory.
+target_compile_definitions(test_cli PRIVATE
+  HC_DEFAULT_BINDINGS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt"
+)
 
 # Tests for the platform layer. Guarded, because hc_platform and OpenCV only
 # exist when HC_BUILD_APP is ON; with it OFF this whole block is skipped and

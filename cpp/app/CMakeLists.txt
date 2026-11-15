@@ -40,6 +40,7 @@ endif()
 add_executable(hand_controller src/main.cpp)
 target_link_libraries(hand_controller PRIVATE
   hc_cli
+  hc_control
   hc_platform
   hc_vision_ort
 )

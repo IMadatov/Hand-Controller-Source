@@ -18,6 +18,7 @@ add_library(hc_control STATIC
   src/action_mapper.cpp
   src/logging_sink.cpp
   src/queued_sink.cpp
+  src/controller.cpp
 )
 
 target_include_directories(hc_control PUBLIC
