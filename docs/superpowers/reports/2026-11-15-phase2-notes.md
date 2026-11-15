@@ -161,6 +161,58 @@ reader, which is what libinput actually is.
 
 ---
 
+## The first run against a real hand
+
+**It works.** Camera to cursor, on this machine, confirmed by the owner:
+the skeleton drew, the gesture captions named the pose, and moving the index
+finger moved the real cursor through the uinput sink.
+
+This is also the first time a camera existed here. Both earlier reports say
+`/dev/video*` is absent, and that is now **stale**: `/dev/video0` is a
+**DroidCam virtual camera** over `v4l2loopback` (`exclusive_caps=Y`,
+`max_openers=10`), fed from a phone. So the project's "no camera" constraint
+is lifted, with one operational wrinkle worth recording because it cost time:
+
+> A stale `hand_controller` from an earlier session had held `/dev/video0`
+> open for 3.5 hours, and OpenCV reported only `EBUSY` / "can't open camera by
+> index". Scan `/proc/*/fd` for `/dev/video*` before believing the camera is
+> at fault.
+
+### Two defects the real run exposed, both fixed
+
+Neither was findable without a person in front of the camera, which is the
+argument for doing this before any further building.
+
+**1. Closing the preview window did nothing.** The log shows the GTK window
+destroyed and recreated twice — the owner clicked the X and it came back, and
+`Ctrl+C` was the only way out. The cause was a check that had been wrong in
+both directions: first `WND_PROP_VISIBLE < 1` quit after one frame, then
+treating its `-1` as "unsupported, so not closed" meant a close was never
+noticed. Measured, rather than guessed at a third time:
+
+| state | `VISIBLE` | `AUTOSIZE` | `getWindowImageRect` |
+|---|---|---|---|
+| no window ever | -1 | -1 | throws |
+| window up | -1 | 1 | 160x120 |
+| after it is destroyed | -1 | **1 (stale)** | **-1 x -1** |
+
+Only the image rect distinguishes a live window from a destroyed one here. The
+check also had to move **before** `imshow`, because `imshow` silently recreates
+a closed window, so any check after it sees a live one.
+
+**2. `Ctrl+C` released nothing.** SIGINT killed the process with neither
+`Controller::Stop()` nor any destructor running, so a key held by a gesture at
+that instant was never released. The uinput sink happened to survive it —
+the kernel releases a vanished device's keys itself — but **that is luck, not
+design**, and XTest or SendInput would have stranded the key for the session.
+SIGINT and SIGTERM now set a flag the frame loop reads, and shutdown runs the
+normal path.
+
+Review focus 7 says "every exit path". The real run found the two that were
+not covered, and both were in the frontend rather than in any tested unit.
+
+---
+
 ## Measurements
 
 Layers 3–5, two hands holding bound gestures, 200,000 frames

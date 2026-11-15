@@ -52,19 +52,36 @@ struct HandLabel {
 void DrawHandLabels(cv::Mat& bgr, const std::vector<HandObservation>& obs,
                     const std::vector<HandLabel>& labels);
 
-// Decides whether the preview window has been closed by the user, given the
-// value OpenCV's getWindowProperty(WND_PROP_VISIBLE) returned and whether the
-// window has ever been seen visible.
+// Decides whether the preview window has been closed by the user.
+//
+// `visible_prop` is what getWindowProperty(WND_PROP_VISIBLE) returned,
+// `image_width` is the width from getWindowImageRect (negative when the
+// window is gone), and `was_visible` is whether a live window has ever been
+// observed.
 //
 // Split out as a free function because it is the one piece of Overlay's quit
-// logic that can be tested without a display -- and it is the piece that was
-// wrong: a NEGATIVE `visible_prop` means the backend does not implement the
-// property at all, which is what the trimmed GTK build here returns (-1 on
-// every call). Treating that as "not visible" quits after a single frame.
+// logic testable without a display -- and it has now been wrong twice, in
+// opposite directions, which is why it is worth this much comment.
 //
-// `was_visible` guards the other end: a window that has just been created is
-// legitimately not visible yet, and must not be read as closed.
-bool WindowClosed(double visible_prop, bool was_visible);
+// FIRST VERSION read only WND_PROP_VISIBLE and quit when it was below 1. On
+// the trimmed GTK build here that property returns -1 unconditionally, so the
+// loop exited after a single frame.
+//
+// SECOND VERSION treated a negative value as "unsupported, so not closed",
+// which fixed that and made closing the window do nothing at all: the next
+// imshow silently recreated it. Measured on 2026-11-15 with a real run -- the
+// user closed the window twice and the log shows it recreated both times.
+//
+// THE DISCRIMINATOR IS THE IMAGE RECT, measured rather than guessed:
+//
+//   state                VISIBLE  AUTOSIZE  getWindowImageRect
+//   no window ever          -1       -1     throws
+//   window up               -1        1     160x120
+//   after it is destroyed   -1        1     -1 x -1
+//
+// So AUTOSIZE goes stale and VISIBLE is useless, and only the rect
+// distinguishes a live window from a destroyed one on this backend.
+bool WindowClosed(double visible_prop, int image_width, bool was_visible);
 
 // The debug preview window. Along with the frame sources, this is the only
 // part of the project allowed to touch OpenCV's UI; the pipeline must run

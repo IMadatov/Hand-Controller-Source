@@ -7,6 +7,7 @@
 // the preview window, and the report -- the three things that are genuinely
 // specific to being a command-line program.
 
+#include <csignal>
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -39,6 +40,24 @@
 #include "hc/synthetic_frame_source.hpp"
 
 namespace {
+
+// Set by the signal handler, read by the frame loop.
+//
+// REVIEW FOCUS 7 SAYS "EVERY EXIT PATH", AND Ctrl+C IS ONE. Without this,
+// SIGINT kills the process with neither Controller::Stop() nor any destructor
+// running, so a key held by a gesture at that moment is never released. The
+// uinput sink happens to survive it -- the kernel destroys a vanished
+// device's keys itself -- but that is luck, and XTest or SendInput would
+// strand the key for as long as the session lasts.
+//
+// volatile sig_atomic_t, not std::atomic<bool>: this is the one type the
+// standard permits a handler to touch, and the handler does nothing else.
+// Everything that cannot be done safely from a handler -- releasing keys,
+// closing the device, printing the report -- happens on the normal path,
+// which is the point of a flag rather than an exit() in the handler.
+volatile std::sig_atomic_t g_interrupted = 0;
+
+extern "C" void OnInterrupt(int) { g_interrupted = 1; }
 
 // Commands held before the dispatch queue starts evicting. Generous: at ~90
 // frames per second a held gesture produces one command per frame, so this is
@@ -292,6 +311,12 @@ int main(int argc, char** argv) {
   const std::string sink_status = SinkStatus(opts, controller);
   std::cout << "sink: " << sink_status << "\n";
 
+  // Installed only now, with a Controller alive to shut down. Both signals,
+  // because a terminal sends INT and a service manager sends TERM, and a key
+  // left down does not care which arrived.
+  std::signal(SIGINT, OnInterrupt);
+  std::signal(SIGTERM, OnInterrupt);
+
   std::unique_ptr<hc::Overlay> overlay;
   if (opts.want_overlay) overlay = std::make_unique<hc::Overlay>("hand_controller");
 
@@ -308,6 +333,11 @@ int main(int argc, char** argv) {
   const auto run_start = std::chrono::high_resolution_clock::now();
 
   while (controller.Step()) {
+    if (g_interrupted) {
+      std::cout << "\ninterrupted; releasing input and shutting down\n";
+      break;
+    }
+
     if (!overlay) continue;
 
     controller.PollObservations(observations);

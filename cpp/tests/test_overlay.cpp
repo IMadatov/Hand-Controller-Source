@@ -145,24 +145,43 @@ TEST(Overlay, HandlesWildlyOutOfRangeLandmarksWithoutCrashing) {
 // original check was `prop < 1.0`, which -1 satisfies, so every frame
 // reported "window closed". Render/ShouldQuit have no end-to-end test (they
 // need a display), so this pins the decision itself.
-TEST(Overlay, UnsupportedVisibilityPropertyIsNotAClose) {
-  EXPECT_FALSE(hc::WindowClosed(-1.0, /*was_visible=*/false));
-  EXPECT_FALSE(hc::WindowClosed(-1.0, /*was_visible=*/true));
+TEST(Overlay, UnsupportedVisibilityWithALiveWindowIsNotAClose) {
+  // The GTK build here returns -1 for the property on EVERY call, including
+  // while the window is perfectly alive. The first version of this check read
+  // -1 as "not visible" and quit after a single frame.
+  EXPECT_FALSE(hc::WindowClosed(-1.0, /*image_width=*/640,
+                                /*was_visible=*/true));
 }
 
 TEST(Overlay, WindowNotYetMappedIsNotAClose) {
-  // Supported property, but the compositor has not mapped the window yet.
-  // Reading that as a close is the same one-frame-exit bug by another route.
-  EXPECT_FALSE(hc::WindowClosed(0.0, /*was_visible=*/false));
+  // Nothing has been seen alive yet. Creating a window and asking the same
+  // instant whether it is gone is a race, not a close.
+  EXPECT_FALSE(hc::WindowClosed(-1.0, /*image_width=*/-1,
+                                /*was_visible=*/false));
+  EXPECT_FALSE(hc::WindowClosed(0.0, /*image_width=*/-1,
+                                /*was_visible=*/false));
 }
 
 TEST(Overlay, VisibleWindowIsNotClosed) {
-  EXPECT_FALSE(hc::WindowClosed(1.0, /*was_visible=*/true));
+  EXPECT_FALSE(hc::WindowClosed(1.0, /*image_width=*/640,
+                                /*was_visible=*/true));
 }
 
-TEST(Overlay, WindowThatWasVisibleAndIsNoLongerIsClosed) {
-  // The actual close: seen visible, now reported not visible.
-  EXPECT_TRUE(hc::WindowClosed(0.0, /*was_visible=*/true));
+// THE CASE THAT WAS BROKEN IN BOTH DIRECTIONS, and the one a user hits by
+// clicking the title bar's X. Measured on this build: a destroyed window
+// still reports VISIBLE=-1 and a stale AUTOSIZE=1, and only the image rect
+// goes negative. Before this, closing the window did nothing at all -- the
+// next imshow recreated it and the loop ran on.
+TEST(Overlay, AWindowThatWasAliveAndHasNoRectIsClosed) {
+  EXPECT_TRUE(hc::WindowClosed(-1.0, /*image_width=*/-1,
+                               /*was_visible=*/true));
+}
+
+// A backend that DOES report visibility is still honoured, so this does not
+// become Linux-GTK-only behaviour by accident.
+TEST(Overlay, AReportedInvisibleWindowIsStillAClose) {
+  EXPECT_TRUE(hc::WindowClosed(0.0, /*image_width=*/640,
+                               /*was_visible=*/true));
 }
 
 // Track ids are not indices: they come from the tracker's monotonic counter
