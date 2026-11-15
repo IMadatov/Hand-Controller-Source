@@ -77,10 +77,13 @@ bool Controller::Step() {
   // layers reads a clock, which is what lets the whole chain be replayed from
   // a script in a test.
   recognizer_.Process(observations_, frame_.timestamp_us, events_);
-  mapper_.Map(events_, commands_);
+  mapper_.Map(events_, commands_, command_origins_);
 
-  for (const Command& c : commands_) {
-    if (sink_ != nullptr) sink_->Send(c);
+  // Commands are still PRODUCED and still reported while paused -- a paused
+  // session is one a user is watching, and the point of watching is to see
+  // what the gestures would do. Only the sink is skipped.
+  if (!paused_ && sink_ != nullptr) {
+    for (const Command& c : commands_) sink_->Send(c);
   }
 
   ++processed_;
@@ -97,6 +100,26 @@ void Controller::PollCommands(std::vector<Command>& out) const {
 
 void Controller::PollEvents(std::vector<GestureEvent>& out) const {
   out = events_;
+}
+
+void Controller::PollCommandOrigins(std::vector<std::uint32_t>& out) const {
+  out = command_origins_;
+}
+
+void Controller::SetPaused(bool paused) {
+  if (paused_ == paused) return;
+  paused_ = paused;
+
+  // On the way IN only. Leaving pause presses nothing, and entering it must
+  // not leave a key down for the duration.
+  if (paused_ && sink_ != nullptr) sink_->ReleaseAll();
+}
+
+void Controller::SetSink(std::unique_ptr<IOutputSink> sink) {
+  // The outgoing sink is the only thing that can release what it pressed, and
+  // in a moment it will not exist.
+  if (sink_ != nullptr) sink_->ReleaseAll();
+  sink_ = std::move(sink);
 }
 
 void Controller::SetBindings(BindingSet bindings) {

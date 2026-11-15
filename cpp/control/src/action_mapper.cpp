@@ -62,9 +62,23 @@ Point2 ActionMapper::Filter(std::uint32_t track_id, const Point2& raw) {
 
 void ActionMapper::Map(const std::vector<GestureEvent>& events,
                        std::vector<Command>& out) {
-  out.clear();
+  MapInto(events, out, nullptr);
+}
 
-  for (const GestureEvent& e : events) {
+void ActionMapper::Map(const std::vector<GestureEvent>& events,
+                       std::vector<Command>& out,
+                       std::vector<std::uint32_t>& out_origin) {
+  MapInto(events, out, &out_origin);
+}
+
+void ActionMapper::MapInto(const std::vector<GestureEvent>& events,
+                           std::vector<Command>& out,
+                           std::vector<std::uint32_t>* out_origin) {
+  out.clear();
+  if (out_origin != nullptr) out_origin->clear();
+
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    const GestureEvent& e = events[index];
     // A new gesture starts from rest. Without this the tail of the previous
     // gesture's motion would leak into the new one -- a quick pinch followed
     // by pointing would fling the cursor.
@@ -105,6 +119,9 @@ void ActionMapper::Map(const std::vector<GestureEvent>& events,
       }
 
       out.push_back(c);
+      if (out_origin != nullptr) {
+        out_origin->push_back(static_cast<std::uint32_t>(index));
+      }
     }
   }
 }

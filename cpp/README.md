@@ -28,6 +28,7 @@ Phase 2 outcome: `docs/superpowers/reports/2026-11-15-phase2-notes.md`.
 | `platform/` | `hc_platform` | The per-system layer. Frames in, pixels out, events out. The **only** target allowed OpenCV |
 | `app/` | `hc_cli` | Argument parsing. Links nothing but the standard library |
 | | `hand_controller` | `main()`, which wires every layer together |
+| `ffi/` | `hc_ffi` | The **C ABI** over `Controller`, built as `libhand_controller.so`. One artifact for Dart FFI, .NET P/Invoke or a C client |
 | `tests/` | | GoogleTest suites, one binary per unit |
 | `tools/` | `validate_models` | Produced `docs/models.md` |
 | | `xtest_probe` | Proves whether XTest actually moves the pointer |
@@ -298,6 +299,27 @@ purpose, so switching between two of those takes a **confirmed takeover**: the
 old gesture `ended`s on one frame and the new one `began`s on a later one (two
 frames by default, ~20 ms). Point to move the cursor and raise the middle
 finger to click, and that is the path being taken.
+
+### Embedding the engine in another language
+
+`cpp/ffi/include/hc/hand_controller.h` is a pure C header over
+`hc::Controller`, and `libhand_controller.so` is the one artifact a host
+loads:
+
+```bash
+cmake --build cpp/build-app --target hc_ffi
+# -> cpp/build-app/ffi/libhand_controller.so
+```
+
+It exports exactly 25 `hc_*` symbols and hides everything else, including its
+static dependencies' — a host carrying its own OpenCV or ONNX Runtime cannot
+bind to ours. The frame loop runs on a thread **inside** the library, because
+`Step()` costs ~11 ms and no UI thread can pay that ninety times a second; a
+host polls the latest snapshot and never blocks on a frame.
+
+Nothing crosses the boundary but plain structs, and no exception escapes it.
+The header explains each decision where it is made; start there rather than in
+the implementation.
 
 ### For a UI built on top of this
 

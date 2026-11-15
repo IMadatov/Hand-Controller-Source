@@ -161,12 +161,86 @@ Three consequences for the GUI, and the first two are new:
 
 ---
 
-## 4. `Controller` has landed — build the mock against this shape
+## 4. The C ABI has landed — `FfiEngine` can be written now
 
-Task 11 is done (`cpp/control/include/hc/controller.hpp`). The `extern "C"`
-shim over it is still unwritten and still out of phase 2 scope, so the GUI
-remains on `MockEngine` for now — but the shape the mock should imitate is no
-longer a guess:
+**Phase 3: the shim is written, tested and building.** The GUI is no longer
+blocked on anything from this side.
+
+```
+header:  cpp/ffi/include/hc/hand_controller.h      (pure C, heavily commented)
+library: cpp/build-app/ffi/libhand_controller.so    (14 MB, 25 exported symbols)
+build:   cmake --build cpp/build-app --target hc_ffi
+tests:   cpp/tests/test_ffi.cpp                    (25 cases, through the C API only)
+```
+
+Read the header rather than this section for the details — it is the contract
+and it explains every decision in place. What follows is the orientation.
+
+### What the API gives you
+
+```c
+hc_config config; hc_config_defaults(&config);   /* ALWAYS call this first */
+config.source = HC_SOURCE_CAMERA;  config.camera_index = 0;
+config.sink   = HC_SINK_NONE;      /* preview mode; HC_SINK_UINPUT injects */
+
+char error[1024];
+hc_session* s = hc_session_create(&config, error, sizeof error);  /* NULL on failure */
+hc_session_start(s);
+
+hc_snapshot snap = { .hands = handbuf, .hand_capacity = 4, ... };
+hc_session_poll(s, &snap);                       /* latest frame, never blocks */
+hc_session_copy_frame(s, rgba, capacity, &w, &h);/* RGBA, tightly packed */
+
+hc_session_set_paused(s, 1);
+hc_session_set_sink(s, HC_SINK_UINPUT, error, sizeof error);
+hc_session_bindings_text(s, out, capacity);      /* serialized by C++ */
+hc_session_set_bindings_text(s, text, error, sizeof error);
+hc_enumerate_cameras(cameras, capacity);
+hc_session_stop(s); hc_session_destroy(s);
+```
+
+Each of the Dart interface's methods has a direct counterpart:
+`start` → `hc_session_create` + `hc_session_start`; `setPaused` →
+`hc_session_set_paused`; `setInjectInput` → `hc_session_set_sink`;
+`loadBindings`/`saveBindings` → the two bindings-text calls;
+`enumerateCameras` → `hc_enumerate_cameras`; `frames` → poll on a timer.
+
+### Six things that will bite if they are not known
+
+1. **THE FRAME LOOP IS ALREADY ON A THREAD, inside the library.** `Step()`
+   costs ~11 ms and no UI isolate can pay that 90 times a second, so the
+   worker runs in C++ and `hc_session_poll` hands back the latest published
+   snapshot. **Do not call poll from a background isolate to "avoid
+   blocking"** — it is a memcpy, it is cheap, and an isolate would add a
+   copy and a message hop for nothing. Poll from a Ticker or a ~60 Hz timer.
+2. **Poll is NOT a queue.** It reports the last stepped frame; polling twice
+   without a new frame returns the same `frame_index`. Use that field to
+   decide whether to rebuild, or the UI will re-render identical data.
+3. **The pixels are a separate call, on purpose.** They are three orders of
+   magnitude larger than the landmarks. `hc_session_copy_frame` with a null
+   buffer reports the size needed (`width * height * 4`); call it only as
+   often as the preview actually repaints.
+4. **The caller owns every buffer, and truncation is visible.** Pass
+   capacities, read back counts. A count equal to its capacity means there
+   may have been more. Nothing here allocates on your behalf, and the only
+   thing to free is the session handle.
+5. **A failed `set_sink` keeps the previous sink.** Asking to inject is not
+   succeeding: `/dev/uinput` may be inaccessible, and the error string
+   carries the udev rule to fix it. Show it verbatim and leave the toggle
+   where the engine actually is, which `hc_session_sink_available` answers.
+6. **`hc_abi_version()` must equal `HC_ABI_VERSION` from the header you
+   generated bindings against.** Check it once at startup. A mismatched `.so`
+   is otherwise silent until a struct field lands in the wrong place.
+
+### One wart, recorded rather than hidden
+
+The library links GTK, because the platform layer it draws the camera frame
+source from also contains the debug overlay, and that needs OpenCV's highgui.
+Flutter on Linux is GTK3 too, so the same soname is already in the process and
+nothing should conflict — but it is weight the GUI does not use. Splitting the
+platform layer in two is the fix and it is not done.
+
+### The `Controller` shape underneath, for context
 
 ```cpp
 Controller(source, tracker, sink /* may be null */, ControllerConfig, Metrics*)
@@ -185,7 +259,7 @@ bool SinkAvailable() const;
 std::uint64_t ProcessedFrames() const;
 ```
 
-Five properties worth encoding in `MockEngine`, each pinned by a test:
+Five properties the C API passes through unchanged, each pinned by a test:
 
 1. **`Poll*` is not a queue.** It reports the LAST stepped frame, and polling
    twice without stepping returns the same thing. A GUI that treats it as a

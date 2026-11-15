@@ -122,6 +122,12 @@ if(HC_BUILD_APP)
   # exercised by Task 14's manual run instead.
   hc_add_test(test_overlay test_overlay.cpp LIBS hc_platform)
 
+  # The C ABI, exercised THROUGH the C header only -- if a case here needs a
+  # C++ type from the project, the ABI has a hole. Links the shared library
+  # the GUI loads, so a symbol hidden by the visibility settings fails here
+  # rather than in Dart.
+  hc_add_test(test_ffi test_ffi.cpp LIBS hc_ffi)
+
   # The uinput sink, Linux only. Every case here reads the virtual device's
   # own evdev node back, so these are measurements rather than assertions that
   # a write returned -- the distinction XTest's silent failure taught.

@@ -337,3 +337,192 @@ TEST(Controller, TwoControllersDoNotShareState) {
             CountKind(b->Commands(), Command::Kind::MoveCursorRelative));
   EXPECT_GT(CountKind(a->Commands(), Command::Kind::MoveCursorRelative), 0);
 }
+
+// --- phase 3: what the GUI's engine interface needs ----------------------
+
+// "Keep the camera, stop emitting commands" -- the GUI's paused state. The
+// session stays live and the user keeps seeing their hand.
+TEST(Controller, PausedStillReportsCommandsButSendsNone) {
+  auto sink = std::make_unique<LoggingSink>();
+  const LoggingSink* recorded = sink.get();
+
+  Controller controller(Frames(10),
+                        std::make_unique<ScriptedTracker>(PointingDrift(10)),
+                        std::move(sink), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  for (int i = 0; i < 3; ++i) ASSERT_TRUE(controller.Step());
+  const int before = CountKind(recorded->Commands(),
+                               Command::Kind::MoveCursorRelative);
+  ASSERT_GT(before, 0);
+
+  controller.SetPaused(true);
+  EXPECT_TRUE(controller.Paused());
+
+  std::vector<Command> commands;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(controller.Step());
+    controller.PollCommands(commands);
+    EXPECT_EQ(commands.size(), 1u) << "a paused session still produces data";
+  }
+  EXPECT_EQ(CountKind(recorded->Commands(), Command::Kind::MoveCursorRelative),
+            before)
+      << "but the sink heard nothing";
+
+  controller.SetPaused(false);
+  ASSERT_TRUE(controller.Step());
+  EXPECT_GT(CountKind(recorded->Commands(), Command::Kind::MoveCursorRelative),
+            before);
+  controller.Stop();
+}
+
+// Review focus 7, at the moment it is easiest to forget: pausing while a
+// gesture holds a key down must not leave it down for the pause.
+TEST(Controller, PausingReleasesAHeldKey) {
+  auto sink = std::make_unique<LoggingSink>();
+  const LoggingSink* recorded = sink.get();
+
+  std::vector<std::vector<HandObservation>> script;
+  script.push_back({hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f})});
+
+  Controller controller(Frames(8), std::make_unique<ScriptedTracker>(script),
+                        std::move(sink), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  for (int i = 0; i < 3; ++i) ASSERT_TRUE(controller.Step());
+  ASSERT_EQ(CountKind(recorded->Commands(), Command::Kind::KeyPress), 1);
+  ASSERT_EQ(CountKind(recorded->Commands(), Command::Kind::KeyRelease), 0);
+
+  controller.SetPaused(true);
+  EXPECT_EQ(CountKind(recorded->Commands(), Command::Kind::KeyRelease), 1);
+}
+
+TEST(Controller, PausingTwiceReleasesOnlyOnce) {
+  auto sink = std::make_unique<LoggingSink>();
+  const LoggingSink* recorded = sink.get();
+
+  std::vector<std::vector<HandObservation>> script;
+  script.push_back({hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f})});
+
+  Controller controller(Frames(8), std::make_unique<ScriptedTracker>(script),
+                        std::move(sink), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  ASSERT_TRUE(controller.Step());
+  controller.SetPaused(true);
+  controller.SetPaused(true);
+  EXPECT_EQ(CountKind(recorded->Commands(), Command::Kind::KeyRelease), 1);
+}
+
+// The GUI toggles injection while running. Rebuilding the session for it would
+// drop the tracker, the ROI and every gesture latch -- the user's hand would
+// visibly flicker for having ticked a checkbox.
+TEST(Controller, SetSinkSwapsWhereCommandsGoWithoutRestarting) {
+  auto first = std::make_unique<LoggingSink>();
+  const LoggingSink* one = first.get();
+
+  Controller controller(Frames(12),
+                        std::make_unique<ScriptedTracker>(PointingDrift(12)),
+                        std::move(first), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  for (int i = 0; i < 4; ++i) ASSERT_TRUE(controller.Step());
+  const int on_first = CountKind(one->Commands(),
+                                 Command::Kind::MoveCursorRelative);
+  ASSERT_GT(on_first, 0);
+
+  auto second = std::make_unique<LoggingSink>();
+  const LoggingSink* two = second.get();
+  controller.SetSink(std::move(second));
+
+  for (int i = 0; i < 4; ++i) ASSERT_TRUE(controller.Step());
+  EXPECT_EQ(CountKind(one->Commands(), Command::Kind::MoveCursorRelative),
+            on_first)
+      << "the old sink must hear nothing more";
+  EXPECT_GT(CountKind(two->Commands(), Command::Kind::MoveCursorRelative), 0);
+
+  // And the gesture was never interrupted: no Began after the first frame,
+  // which is what proves the session was not rebuilt underneath.
+  std::vector<hc::GestureEvent> events;
+  controller.PollEvents(events);
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events[0].phase, hc::GestureEvent::Phase::Held);
+  controller.Stop();
+}
+
+// The outgoing sink is the only thing that can release what it pressed, and a
+// moment later it does not exist. Switching injection off mid-gesture is
+// exactly when a key gets stranded.
+TEST(Controller, SetSinkReleasesTheOutgoingSinksHeldKeys) {
+  auto first = std::make_unique<LoggingSink>();
+  const LoggingSink* one = first.get();
+
+  std::vector<std::vector<HandObservation>> script;
+  script.push_back({hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f})});
+
+  Controller controller(Frames(8), std::make_unique<ScriptedTracker>(script),
+                        std::move(first), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  for (int i = 0; i < 2; ++i) ASSERT_TRUE(controller.Step());
+  ASSERT_EQ(CountKind(one->Commands(), Command::Kind::KeyPress), 1);
+
+  controller.SetSink(nullptr);  // Injection off entirely.
+  EXPECT_EQ(CountKind(one->Commands(), Command::Kind::KeyRelease), 1);
+  EXPECT_FALSE(controller.SinkAvailable());
+
+  // And the session carries on, which is preview mode. Asserted on EVENTS,
+  // not commands: the shipped configuration binds thumb_up on `began` and
+  // `ended` only, so a held thumb-up legitimately produces no command at all.
+  // Checking commands here would have been testing the bindings file.
+  ASSERT_TRUE(controller.Step());
+  std::vector<hc::GestureEvent> events;
+  controller.PollEvents(events);
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events[0].kind, hc::GestureKind::ThumbUp);
+  EXPECT_EQ(events[0].phase, hc::GestureEvent::Phase::Held);
+}
+
+// A command log has to say which hand and which gesture caused each entry.
+// The Command itself carries none of that on purpose.
+TEST(Controller, CommandOriginsPointAtTheEventThatCausedEach) {
+  std::vector<std::vector<HandObservation>> script;
+  // Right hand pointing (move_cursor on held) and left thumb-up (key_press
+  // on began) in the same frame, so the two origins must not be confusable.
+  for (int i = 0; i < 6; ++i) {
+    const float x = 0.45f + static_cast<float>(i) * 0.01f;
+    script.push_back({hc_test::PointIndex(1, Handedness::Right, {x, 0.8f}),
+                      hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f})});
+  }
+
+  Controller controller(Frames(6), std::make_unique<ScriptedTracker>(script),
+                        /*sink=*/nullptr, ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  ASSERT_TRUE(controller.Step());  // Both hands Began.
+
+  std::vector<hc::GestureEvent> events;
+  std::vector<Command> commands;
+  std::vector<std::uint32_t> origins;
+  controller.PollEvents(events);
+  controller.PollCommands(commands);
+  controller.PollCommandOrigins(origins);
+
+  ASSERT_EQ(origins.size(), commands.size());
+  ASSERT_FALSE(commands.empty());
+  for (std::size_t i = 0; i < commands.size(); ++i) {
+    ASSERT_LT(origins[i], events.size());
+    const hc::GestureEvent& cause = events[origins[i]];
+    if (commands[i].kind == Command::Kind::KeyPress) {
+      EXPECT_EQ(cause.handedness, Handedness::Left);
+      EXPECT_EQ(cause.kind, hc::GestureKind::ThumbUp);
+      EXPECT_EQ(cause.phase, hc::GestureEvent::Phase::Began);
+    }
+  }
+}
+
+TEST(Controller, CommandOriginsAreEmptyWhenNothingMatched) {
+  Controller controller(Frames(4),
+                        std::make_unique<ScriptedTracker>(PointingDrift(4)),
+                        /*sink=*/nullptr, ControllerConfig{});  // No bindings.
+  ASSERT_TRUE(controller.Start());
+  ASSERT_TRUE(controller.Step());
+
+  std::vector<std::uint32_t> origins;
+  controller.PollCommandOrigins(origins);
+  EXPECT_TRUE(origins.empty());
+}

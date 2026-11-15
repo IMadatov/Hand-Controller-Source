@@ -129,6 +129,15 @@ class Controller {
   // command but still appears here.
   void PollEvents(std::vector<GestureEvent>& out) const;
 
+  // Where each polled command came from: `out[i]` is the index into the
+  // PollEvents result of the event that produced command `i`.
+  //
+  // For a command log that can say which hand and which gesture caused an
+  // entry. A Command carries none of that on purpose -- it is an instruction
+  // to a sink, not a record for a reader -- so the link is a parallel index
+  // instead of a fatter Command.
+  void PollCommandOrigins(std::vector<std::uint32_t>& out) const;
+
   // The last stepped frame, for a frontend that draws it.
   //
   // LIFETIME: `view` is non-owning and belongs to the frame source. It is
@@ -137,6 +146,37 @@ class Controller {
   // -- must copy them. This is IFrameSource's own contract, passed through
   // unchanged rather than papered over with a copy nobody asked for.
   const Frame& LastFrame() const { return frame_; }
+
+  // Stops DISPATCHING commands while keeping the session running: frames
+  // still arrive, gestures are still recognized, and Poll* still reports
+  // everything. Only the sink stops hearing about it.
+  //
+  // Entering pause RELEASES whatever the sink holds, and that is the whole
+  // reason this lives here rather than in a frontend that simply ignores the
+  // commands: pausing while a gesture holds an arrow key down would otherwise
+  // leave it down for as long as the pause lasted. Review focus 7 again.
+  //
+  // Leaving pause does not re-press anything. A held gesture produces `Held`
+  // events whose bindings act per frame, so continuous motion resumes by
+  // itself; a one-shot press that was interrupted does not come back, which
+  // is the conservative half of the trade and the right one for a key.
+  void SetPaused(bool paused);
+
+  bool Paused() const { return paused_; }
+
+  // Swaps the sink mid-session. Pass nullptr for no sink at all, which is a
+  // supported configuration.
+  //
+  // RELEASES THE OUTGOING SINK FIRST. Switching injection off while a gesture
+  // holds a key is exactly the moment a key gets stranded -- the old sink is
+  // the only thing that can release what the old sink pressed, and a moment
+  // later it no longer exists.
+  //
+  // Exists because the GUI toggles injection while running, and rebuilding
+  // the whole session for it would drop the tracker, the ROI and every
+  // gesture latch -- the user would see their hand flicker for having
+  // ticked a checkbox.
+  void SetSink(std::unique_ptr<IOutputSink> sink);
 
   // Replaces the bindings mid-session, dropping smoothing state with them.
   // The bindings UI exists to edit bindings and apply them without a restart,
@@ -177,6 +217,7 @@ class Controller {
   ActionMapper mapper_;
 
   State state_ = State::Idle;
+  bool paused_ = false;
   int frame_limit_;
   std::uint64_t processed_ = 0;
 
@@ -186,6 +227,7 @@ class Controller {
   std::vector<HandObservation> observations_;
   std::vector<GestureEvent> events_;
   std::vector<Command> commands_;
+  std::vector<std::uint32_t> command_origins_;
 };
 
 }  // namespace hc

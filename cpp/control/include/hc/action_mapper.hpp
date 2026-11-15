@@ -41,6 +41,19 @@ class ActionMapper {
   void Map(const std::vector<GestureEvent>& events,
            std::vector<Command>& out);
 
+  // The same, plus PROVENANCE: `out_origin[i]` is the index into `events` of
+  // the event that produced `out[i]`. Both vectors are cleared first and end
+  // the same length.
+  //
+  // Exists because a command alone cannot explain itself. A UI showing a
+  // command log needs to say which hand and which gesture caused each entry,
+  // and a Command deliberately does not carry that -- it is a plain-data
+  // instruction to a sink, and growing it with fields only a log reads would
+  // put UI concerns on the injection path. Keeping the link as a parallel
+  // index means the sink's input stays exactly what it was.
+  void Map(const std::vector<GestureEvent>& events, std::vector<Command>& out,
+           std::vector<std::uint32_t>& out_origin);
+
   // Replaces the configuration and drops all smoothing state.
   //
   // Exists because bindings are editable at runtime -- `--bindings` reloading
@@ -64,6 +77,12 @@ class ActionMapper {
     bool in_use;
     Point2 smoothed;  // Last smoothed motion for this track.
   };
+
+  // The one implementation behind both Map overloads. `out_origin` is null
+  // when the caller does not want provenance.
+  void MapInto(const std::vector<GestureEvent>& events,
+               std::vector<Command>& out,
+               std::vector<std::uint32_t>* out_origin);
 
   TrackState* FindOrCreate(std::uint32_t track_id);
   void ResetTrack(std::uint32_t track_id);
