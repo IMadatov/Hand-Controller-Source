@@ -198,10 +198,10 @@ Qurilgani (branch `hand-controller-gui`):
 | Live View | `gui/lib/screens/live_view.dart` | ✅ |
 | Commands & Bindings | `gui/lib/screens/bindings_screen.dart` | ✅ |
 | Settings, Diagnostics | `gui/lib/screens/` | ✅ |
-| Onboarding, Tray Overlay | — | ⏳ |
-| `FfiEngine` | — | ⛔ Task 11 ni kutadi |
+| Onboarding, Tray Overlay | `gui/lib/screens/` | ✅ Settings → System dan |
+| `FfiEngine` | — | ⛔ `extern "C"` shim ni kutadi (phase 3) |
 
-29 ta test o'tadi. Ekranlar `gui/test/goldens/*.png` ga render qilinadi
+36 ta test o'tadi. Ekranlar `gui/test/goldens/*.png` ga render qilinadi
 (`flutter test --update-goldens test/screenshots_test.dart`) — bu mashinada
 Wayland va screenshot utiliti yo'qligi uchun ko'rish usuli shu.
 
@@ -230,3 +230,45 @@ Bular GUI qurilishida chiqdi va **C++ tomonida qaror talab qiladi**:
 ### FfiEngine kelganda o'zgaradigan yagona joy
 
 `gui/lib/main.dart` dagi `buildEngine()`. Boshqa hech narsa.
+
+---
+
+## 9. Yangilanish, `Controller` landed (2026-11-15 kechqurun)
+
+Task 11 tugadi va `specs/2026-11-15-gui-contract.md` §4 da uning shakli
+yozilgan. Unga solishtirib, mock'da **uchta taxmin noto'g'ri** ekani topildi
+va tuzatildi:
+
+1. **`HandObservation` imo-ishorani bilmaydi.** Dart ko'zgusiga `gesture`,
+   `gestureScore`, `palmCenter`, `palmSize` qo'shilgan edi va Live View
+   shulardan o'qirdi — haqiqiy engine'da ular shunchaki bo'sh bo'lardi.
+   Endi struktura C++ bilan maydonma-maydon bir xil; imo-ishora `events` dan
+   keladi.
+2. **`Poll*` navbat emas.** Oxirgi qadamlangan kadrni qaytaradi. Shuning
+   uchun `EngineFrame` endi `hands` + `events` + `commands` ni birga olib
+   yuradi va alohida command stream yo'q.
+3. **Hech narsa `ReleaseAll` qilmasdi.** `stop()` va `pause` endi barcha
+   faol imo-ishoralarni tugatadi va qo'yib yuborishlarni oxirgi kadr sifatida
+   e'lon qiladi.
+
+### Haqiqiy API ga ulanish uchun qolgani
+
+| # | Ish | Kim |
+|---|---|---|
+| 1 | `extern "C"` shim over `Controller` | C++ sessiya (phase 3) |
+| 2 | `FfiEngine` — `HandControllerEngine` ning ikkinchi implementatsiyasi | GUI |
+| 3 | `.so` ni Flutter bundle'iga qo'shish | GUI |
+
+Shim yozilmagunicha `FfiEngine` **boshlanmaydi**: simvol nomlari, struktura
+maketlari va polling protokoli taxmin bo'lar edi, va aynan shu tipdagi
+taxmin bugun ikki marta tuzatishga olib keldi.
+
+### Mashina haqida ikki yangilik
+
+- **`/dev/video0` paydo bo'ldi** — lekin bu `DroidCam Virtual Camera`,
+  imkoniyati `:video_output:`, ya'ni loopback. Telefon oqim yubormasa undan
+  kadr o'qib bo'lmaydi. Ikkala sessiyaning "kamera yo'q" deb yozgan hujjati
+  shu ma'noda hamon to'g'ri, lekin yo'l ochildi.
+- **Hech narsa haqiqiy qo'l bilan kalibrlanmagan** (phase 2 hisoboti).
+  DroidCam ishlasa, bu birinchi marta imkonli bo'ladi — va onboarding'ning
+  Calibrate qadami aynan shu o'lchovni oladi.
