@@ -25,7 +25,9 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
 
   EngineFrame? _frame;
   final _log = <_LogEntry>[];
-  List<CameraDevice> _cameras = const [];
+  /// Null while enumeration is still in flight. An empty list means the
+  /// machine genuinely has no camera, and the two must not look alike.
+  List<CameraDevice>? _cameras;
 
   @override
   void didChangeDependencies() {
@@ -289,12 +291,32 @@ class _InjectSwitch extends StatelessWidget {
 class _CameraRow extends StatelessWidget {
   const _CameraRow({required this.cameras, required this.state});
 
-  final List<CameraDevice> cameras;
+  /// Null while still being enumerated.
+  final List<CameraDevice>? cameras;
   final EngineState state;
 
   @override
   Widget build(BuildContext context) {
-    if (cameras.isEmpty) {
+    final found = cameras;
+    if (found == null) {
+      return const HcPanel(
+        padding: EdgeInsets.symmetric(
+            horizontal: HcSpace.lg, vertical: HcSpace.md),
+        child: Row(
+          children: [
+            Icon(Icons.search, size: 15, color: HcColors.textFaint),
+            SizedBox(width: HcSpace.md),
+            Text('Looking for cameras', style: TextStyle(
+              fontFamily: HcFont.sans,
+              fontSize: 12,
+              color: HcColors.textFaint,
+            )),
+          ],
+        ),
+      );
+    }
+
+    if (found.isEmpty) {
       // The build machine has no `/dev/video*` at all, so this is not a rare
       // path and must read as a plain fact rather than a crash.
       return const HcPanel(
@@ -315,7 +337,7 @@ class _CameraRow extends StatelessWidget {
       );
     }
 
-    final selected = state.camera ?? cameras.first;
+    final selected = state.camera ?? found.first;
 
     return HcPanel(
       padding: const EdgeInsets.symmetric(
@@ -336,7 +358,7 @@ class _CameraRow extends StatelessWidget {
                 icon: const Icon(Icons.expand_more,
                     size: 16, color: HcColors.textFaint),
                 items: [
-                  for (final camera in cameras)
+                  for (final camera in found)
                     DropdownMenuItem(
                       value: camera,
                       child: Text(

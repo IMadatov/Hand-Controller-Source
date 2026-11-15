@@ -6,6 +6,7 @@ import 'screens/bindings_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'screens/live_view.dart';
 import 'screens/settings_screen.dart';
+import 'state/app_settings.dart';
 import 'state/bindings_controller.dart';
 import 'theme/app_theme.dart';
 import 'theme/tokens.dart';
@@ -56,6 +57,21 @@ class BindingsScope extends InheritedNotifier<BindingsController> {
   }
 }
 
+/// Hands the app's own preferences down the tree.
+class SettingsScope extends InheritedNotifier<AppSettings> {
+  const SettingsScope({
+    super.key,
+    required AppSettings settings,
+    required super.child,
+  }) : super(notifier: settings);
+
+  static AppSettings of(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<SettingsScope>();
+    assert(scope != null, 'No SettingsScope above this widget');
+    return scope!.notifier!;
+  }
+}
+
 class HandControllerApp extends StatefulWidget {
   const HandControllerApp({super.key, required this.engine});
 
@@ -67,10 +83,12 @@ class HandControllerApp extends StatefulWidget {
 
 class _HandControllerAppState extends State<HandControllerApp> {
   late final _bindings = BindingsController(widget.engine)..load();
+  final _settings = AppSettings();
 
   @override
   void dispose() {
     _bindings.dispose();
+    _settings.dispose();
     super.dispose();
   }
 
@@ -83,7 +101,10 @@ class _HandControllerAppState extends State<HandControllerApp> {
           engine: widget.engine,
           child: BindingsScope(
             controller: _bindings,
-            child: const AppShell(),
+            child: SettingsScope(
+              settings: _settings,
+              child: const AppShell(),
+            ),
           ),
         ),
       );

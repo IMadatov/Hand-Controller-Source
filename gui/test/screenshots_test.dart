@@ -105,12 +105,33 @@ void main() {
       AppSection.diagnostics,
     ]) {
       await tester.tap(find.text(section.label));
-      await tester.pump(const Duration(milliseconds: 100));
+
+      // Twice. A screen's startup work is kicked off DURING the pump that
+      // mounts it — Settings and Diagnostics both enumerate cameras — so one
+      // pump captures the loading state rather than the screen.
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+
       await expectLater(
         find.byType(HandControllerApp),
         matchesGoldenFile('goldens/${section.name}.png'),
       );
     }
+
+    // Diagnostics again with injection requested and refused, which is the
+    // state this screen exists for: XTest reports success and moves nothing,
+    // so a user whose gestures do nothing is sent here to find out why.
+    await engine.setInjectInput(true);
+    await tester.pump(const Duration(milliseconds: 100));
+    await expectLater(
+      find.byType(HandControllerApp),
+      matchesGoldenFile('goldens/diagnostics_input_unavailable.png'),
+    );
+
+    // A screen's startup work is kicked off DURING the pump that mounts it,
+    // so it is still outstanding when that pump returns. One more drains
+    // whatever the last section started.
+    await tester.pump(const Duration(milliseconds: 400));
 
     await engine.dispose();
   });
