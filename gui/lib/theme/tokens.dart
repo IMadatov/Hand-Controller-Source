@@ -115,7 +115,12 @@ abstract final class HcFont {
 
   /// Numbers that change every frame — fps, latency, confidence.
   ///
-  /// Monospace so the digits do not shift the layout as they tick. A
-  /// proportional font makes a live fps counter visibly jitter.
-  static const mono = 'monospace';
+  /// Inter again, not a monospace family. What a live counter actually needs
+  /// is TABULAR FIGURES — equal-width digits — so the row does not reflow as
+  /// the number ticks, and Inter has them. Asking fontconfig for `monospace`
+  /// would get a different face on every machine and nothing at all in a
+  /// test, which is how a readout ends up rendering as empty boxes.
+  ///
+  /// Always pair this with `FontFeature.tabularFigures()`.
+  static const mono = sans;
 }

@@ -76,9 +76,11 @@ FingerCurl curlFor(GestureKind kind) => switch (kind) {
       GestureKind.pinch =>
         (thumb: 0.72, index: 0.72, middle: 0.15, ring: 0.1, pinky: 0.1),
 
-      // A relaxed hand making no gesture.
+      // A relaxed hand making no gesture: mostly open, slightly soft. Not
+      // half-curled, which from the front reads as a flat smear rather than
+      // as a hand doing nothing in particular.
       GestureKind.none =>
-        (thumb: 0.45, index: 0.5, middle: 0.5, ring: 0.45, pinky: 0.4),
+        (thumb: 0.7, index: 0.82, middle: 0.85, ring: 0.8, pinky: 0.75),
     };
 
 /// Builds the 21 landmarks of a hand.
@@ -98,7 +100,9 @@ List<NormPoint> buildHandLandmarks({
   // Fingers point up the frame, so negative y. Lengths are fractions of palm
   // width, eyeballed from a hand.
   const fingers = [
-    (base: -0.52, splay: -0.62, length: 0.78, lm: Lm.thumb), // thumb
+    // The thumb leaves the hand at an angle, but not at a right angle: too
+    // much splay here and it reads as a sixth finger lying sideways.
+    (base: -0.52, splay: -0.42, length: 0.70, lm: Lm.thumb),
     (base: -0.26, splay: -0.14, length: 1.02, lm: Lm.index),
     (base: -0.02, splay: 0.0, length: 1.10, lm: Lm.middle),
     (base: 0.20, splay: 0.12, length: 1.00, lm: Lm.ring),
@@ -137,14 +141,18 @@ List<NormPoint> buildHandLandmarks({
     // Straight, the finger continues along its splay. Folded, each joint
     // bends further back toward the palm, which is what makes a fist read as
     // a fist rather than as short fingers.
-    final straight = f.splay + (isThumb ? -0.5 : 0);
-    final segment = f.length / 3;
+    final straight = f.splay + (isThumb ? -0.28 : 0);
+
+    // Phalanges shorten toward the tip. Equal thirds make a curled finger
+    // swing out in a wide arc instead of tucking into the palm.
+    const share = [0.42, 0.33, 0.25];
 
     for (var j = 1; j <= 3; j++) {
-      final bend = (1 - e) * j * 0.85;
+      final bend = (1 - e) * j * 0.8;
       final angle = straight + bend * (isThumb ? -1.0 : 1.0) + bend * 0.15;
 
       // Angle 0 means straight up the frame.
+      final segment = f.length * share[j - 1];
       x += math.sin(angle) * segment;
       y -= math.cos(angle) * segment;
       points[f.lm + j] = place(x, y);
