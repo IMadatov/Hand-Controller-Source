@@ -18,17 +18,25 @@ const int kLandmarkCount = 21;
 typedef NormPoint = ({double x, double y});
 
 /// One hand, on one frame.
+///
+/// FIELD-FOR-FIELD the C++ `hc::HandObservation`, and deliberately nothing
+/// more. It knows **nothing about gestures** — that is the recognizer's
+/// output, delivered as `GestureEvent`s, and a `gesture` field here would be
+/// a second source of truth that drifts from the first.
+///
+/// Palm centre and palm size are not here either. The recognizer derives
+/// them; a `GestureEvent` carries the position. Anything that needs a palm
+/// centre purely to draw computes it from [landmarks], which is a drawing
+/// concern and stays in the painter.
 @immutable
 class HandObservation {
   const HandObservation({
     required this.trackId,
     required this.handedness,
     required this.handednessScore,
+    required this.presence,
     required this.landmarks,
-    required this.palmCenter,
-    required this.palmSize,
-    required this.gesture,
-    required this.gestureScore,
+    required this.timestampUs,
   });
 
   /// Identity across frames. The gesture state machine keys on this, not on
@@ -44,21 +52,16 @@ class HandObservation {
   /// label cannot understand why the wrong hand's binding fired.
   final double handednessScore;
 
+  /// How sure the tracker is that this is a hand at all, `0..1`.
+  ///
+  /// Distinct from [handednessScore], which is confidence in WHICH hand. A
+  /// hand can be unmistakably present and still unlabelled.
+  final double presence;
+
   /// [kLandmarkCount] points, normalized.
   final List<NormPoint> landmarks;
 
-  final NormPoint palmCenter;
-
-  /// Palm width, normalized. Pinch distance is divided by this rather than
-  /// used raw, so that moving the hand away from the camera does not change
-  /// what counts as a pinch.
-  final double palmSize;
-
-  /// The pose currently recognized, or [GestureKind.none].
-  final GestureKind gesture;
-
-  /// Confidence in [gesture], `0..1`.
-  final double gestureScore;
+  final int timestampUs;
 }
 
 /// Whether the app can actually inject input, and why not when it cannot.

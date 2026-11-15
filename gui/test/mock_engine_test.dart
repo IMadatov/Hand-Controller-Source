@@ -34,8 +34,12 @@ void main() {
       frameInterval: const Duration(milliseconds: 35),
       clock: () => DateTime.utc(2026).add(Duration(milliseconds: 35 * tick++)),
     );
-    engine.commands.listen(commands.add);
-    engine.frames.listen(frames.add);
+    engine.frames.listen((f) {
+      frames.add(f);
+      // Commands belong to the frame that produced them; the engine has no
+      // separate command stream, deliberately.
+      commands.addAll(f.commands);
+    });
     await engine.start();
     await Future<void>.delayed(Duration(milliseconds: 35 * forFrames));
   }

@@ -6,15 +6,39 @@ import '../engine/mock_hand.dart';
 import '../theme/tokens.dart';
 import 'common.dart';
 
+/// Where to draw a hand's centre.
+///
+/// COMPUTED, NOT REPORTED. `HandObservation` carries landmarks and nothing
+/// derived; the recognizer's own palm centre reaches the UI on a
+/// `GestureEvent`, and only when a gesture is active. A hand doing nothing
+/// still has to be drawn, so the painter averages the wrist and the four
+/// finger knuckles — a drawing concern, kept in the painter.
+NormPoint palmCentreOf(HandObservation hand) {
+  var x = 0.0, y = 0.0;
+  for (final i in Lm.palmOutline) {
+    x += hand.landmarks[i].x;
+    y += hand.landmarks[i].y;
+  }
+  final n = Lm.palmOutline.length;
+  return (x: x / n, y: y / n);
+}
+
 /// Draws the tracked hands over the camera image.
 ///
 /// This is one of exactly two places in the whole project permitted to
 /// multiply a normalized coordinate by a pixel dimension — the other is the
 /// output sink. Everything upstream speaks `0..1`.
 class HandOverlayPainter extends CustomPainter {
-  const HandOverlayPainter({required this.hands});
+  const HandOverlayPainter({required this.hands, required this.gestures});
 
   final List<HandObservation> hands;
+
+  /// The pose each track currently holds, by track id.
+  ///
+  /// Comes from the engine's gesture EVENTS, not from the observations —
+  /// the observations do not know what a gesture is. A track missing from
+  /// this map is holding nothing, which is a normal state.
+  final Map<int, GestureKind> gestures;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -44,9 +68,9 @@ class HandOverlayPainter extends CustomPainter {
         );
       }
 
-      // The palm centre, which is the position every gesture event reports.
+      final centre = palmCentreOf(hand);
       canvas.drawCircle(
-        at(hand.palmCenter),
+        at(centre),
         4,
         Paint()
           ..color = color
@@ -54,7 +78,7 @@ class HandOverlayPainter extends CustomPainter {
           ..strokeWidth = 1.5,
       );
 
-      _paintLabel(canvas, size, hand, color, at(hand.palmCenter));
+      _paintLabel(canvas, size, hand, color, at(centre));
     }
   }
 
@@ -66,11 +90,12 @@ class HandOverlayPainter extends CustomPainter {
     Color color,
     Offset center,
   ) {
-    if (hand.gesture == GestureKind.none) return;
+    final gesture = gestures[hand.trackId];
+    if (gesture == null || gesture == GestureKind.none) return;
 
     final text = TextPainter(
       text: TextSpan(
-        text: hand.gesture.label,
+        text: gesture.label,
         style: TextStyle(
           fontFamily: HcFont.sans,
           fontSize: 11,
@@ -82,7 +107,7 @@ class HandOverlayPainter extends CustomPainter {
     )..layout();
 
     final padding = const Offset(6, 3);
-    var origin = center - Offset(text.width / 2, hand.palmSize * size.height);
+    var origin = center - Offset(text.width / 2, 0.16 * size.height);
 
     // Keep the label inside the preview; a gesture name sliding off the edge
     // is exactly when the user most wants to read it.
@@ -108,7 +133,8 @@ class HandOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(HandOverlayPainter oldDelegate) =>
-      !identical(oldDelegate.hands, hands);
+      !identical(oldDelegate.hands, hands) ||
+      !identical(oldDelegate.gestures, gestures);
 }
 
 /// The camera image with the overlay on top.
@@ -120,11 +146,15 @@ class PreviewSurface extends StatelessWidget {
   const PreviewSurface({
     super.key,
     required this.hands,
+    required this.gestures,
     required this.caption,
     this.badge,
   });
 
   final List<HandObservation> hands;
+
+  /// The pose each track holds, from the engine's gesture events.
+  final Map<int, GestureKind> gestures;
 
   /// e.g. `1280x720 - HD`.
   final String caption;
@@ -146,7 +176,12 @@ class PreviewSurface extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 const _EmptyFrameHint(),
-                CustomPaint(painter: HandOverlayPainter(hands: hands)),
+                CustomPaint(
+                  painter: HandOverlayPainter(
+                    hands: hands,
+                    gestures: gestures,
+                  ),
+                ),
                 if (badge != null)
                   Positioned(top: HcSpace.md, left: HcSpace.md, child: badge!),
                 Positioned(

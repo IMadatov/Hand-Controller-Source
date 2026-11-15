@@ -52,7 +52,6 @@ class MockEngine implements HandControllerEngine {
 
   final _state = ValueNotifier<EngineState>(EngineState.initial);
   final _frames = StreamController<EngineFrame>.broadcast();
-  final _commands = StreamController<CommandRecord>.broadcast();
 
   Timer? _timer;
   int _frame = 0;
@@ -82,9 +81,6 @@ class MockEngine implements HandControllerEngine {
 
   @override
   Stream<EngineFrame> get frames => _frames.stream;
-
-  @override
-  Stream<CommandRecord> get commands => _commands.stream;
 
   @override
   Future<List<CameraDevice>> enumerateCameras() async {
@@ -161,12 +157,14 @@ class MockEngine implements HandControllerEngine {
   /// app has stopped, with no running process left to release it. Dispatched
   /// even while paused, because a pause is one of the paths.
   void _releaseAll() {
+    final events = <GestureEvent>[];
+
     for (final trackId in _activeGesture.keys.toList()) {
       final held = _activeGesture.remove(trackId)!;
       final handedness =
           _latchedHandedness.remove(trackId) ?? Handedness.unknown;
 
-      _dispatch(GestureEvent(
+      events.add(GestureEvent(
         trackId: trackId,
         handedness: handedness,
         kind: held,
@@ -177,6 +175,18 @@ class MockEngine implements HandControllerEngine {
       ));
     }
     _pendingBegan.clear();
+    if (events.isEmpty) return;
+
+    // Published as a final frame with no hands, so the releases appear in
+    // the log like any other command. Mapped even when paused: pause is one
+    // of the exit paths this exists to cover.
+    _frames.add(EngineFrame(
+      hands: const [],
+      events: events,
+      commands: [for (final e in events) ..._map(e)],
+      metrics: EngineMetrics.zero,
+      timestampUs: _frame * frameInterval.inMicroseconds,
+    ));
   }
 
   @override
@@ -232,7 +242,6 @@ class MockEngine implements HandControllerEngine {
   Future<void> dispose() async {
     await stop();
     await _frames.close();
-    await _commands.close();
     _state.dispose();
   }
 
@@ -301,10 +310,15 @@ class MockEngine implements HandControllerEngine {
       required double tilt,
     }) {
       live.add(trackId);
+
+      // The observation carries NO gesture. The pose is an input to the
+      // drawing below and to the transitions further down, and it reaches
+      // the UI as a GestureEvent, exactly as it does from hc_control.
       hands.add(HandObservation(
         trackId: trackId,
         handedness: handedness,
         handednessScore: handednessScore,
+        presence: 0.94 + 0.05 * math.sin(t * 1.9 + trackId),
         landmarks: buildHandLandmarks(
           center: center,
           size: size,
@@ -312,12 +326,7 @@ class MockEngine implements HandControllerEngine {
           mirror: handedness == Handedness.left,
           tilt: tilt,
         ),
-        palmCenter: center,
-        palmSize: size,
-        gesture: gesture,
-        gestureScore: gesture == GestureKind.none
-            ? 0
-            : 0.78 + 0.18 * math.sin(t * 1.7 + trackId),
+        timestampUs: _frame * frameInterval.inMicroseconds,
       ));
 
       final previous = _previousCenter[trackId];
@@ -395,8 +404,21 @@ class MockEngine implements HandControllerEngine {
       if (!live.contains(trackId)) _pendingBegan.remove(trackId);
     }
 
+    // Mapping happens before the frame is published, so the frame carries
+    // its own commands. A paused session still reports what it saw — the
+    // events — and produces no commands from them, which is what pausing
+    // means.
+    final commands = <CommandRecord>[];
+    if (!paused) {
+      for (final event in events) {
+        commands.addAll(_map(event));
+      }
+    }
+
     _frames.add(EngineFrame(
       hands: hands,
+      events: events,
+      commands: commands,
       metrics: EngineMetrics(
         // Jittered, because a perfectly steady number looks fake and hides
         // whether the readout is actually updating.
@@ -406,11 +428,6 @@ class MockEngine implements HandControllerEngine {
       ),
       timestampUs: _frame * frameInterval.inMicroseconds,
     ));
-
-    if (paused) return;
-    for (final event in events) {
-      _dispatch(event);
-    }
   }
 
   /// Derives `began` / `held` / `ended` from this frame's pose and the last.
@@ -495,8 +512,14 @@ class MockEngine implements HandControllerEngine {
     return out;
   }
 
-  /// Matches an event against the bindings and publishes what it produced.
-  void _dispatch(GestureEvent event) {
+  /// Matches an event against the bindings and returns what it produced.
+  ///
+  /// Usually nothing: most frames carry a `held` event for a pose with no
+  /// continuous binding, or a gesture nobody bound at all. An empty result
+  /// is the common case, not a failure.
+  List<CommandRecord> _map(GestureEvent event) {
+    final produced = <CommandRecord>[];
+
     for (final binding in _bindings.bindings) {
       if (!binding.enabled) continue;
       if (binding.gesture != event.kind) continue;
@@ -512,7 +535,7 @@ class MockEngine implements HandControllerEngine {
         ));
       }
 
-      _commands.add(CommandRecord(
+      produced.add(CommandRecord(
         command: command,
         handedness: event.handedness,
         gesture: event.kind,
@@ -525,5 +548,7 @@ class MockEngine implements HandControllerEngine {
         delivered: _state.value.sink == SinkStatus.active,
       ));
     }
+
+    return produced;
   }
 }

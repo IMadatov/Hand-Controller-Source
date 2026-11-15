@@ -21,9 +21,18 @@ class LiveViewScreen extends StatefulWidget {
 
 class _LiveViewScreenState extends State<LiveViewScreen> {
   StreamSubscription<EngineFrame>? _frameSub;
-  StreamSubscription<CommandRecord>? _commandSub;
 
   EngineFrame? _frame;
+
+  /// What each track is holding right now, rebuilt from gesture EVENTS.
+  ///
+  /// The observations do not carry a gesture — the recognizer's output is
+  /// the event stream — so "current gesture" is state the UI keeps, not a
+  /// field it reads. A track is absent here whenever it holds nothing,
+  /// including the one-to-three-frame window between a takeover's `ended`
+  /// and the next `began`. That gap is the truth and is rendered as no
+  /// gesture rather than smoothed over.
+  final _gestures = <int, GestureKind>{};
   final _log = <_LogEntry>[];
   /// Null while enumeration is still in flight. An empty list means the
   /// machine genuinely has no camera, and the two must not look alike.
@@ -35,12 +44,36 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
     if (_frameSub != null) return;
 
     final engine = EngineScope.of(context);
-    _frameSub = engine.frames.listen((f) {
-      if (mounted) setState(() => _frame = f);
-    });
-    _commandSub = engine.commands.listen(_record);
+    _frameSub = engine.frames.listen(_onFrame);
     engine.enumerateCameras().then((c) {
       if (mounted) setState(() => _cameras = c);
+    });
+  }
+
+  void _onFrame(EngineFrame frame) {
+    if (!mounted) return;
+    setState(() {
+      _frame = frame;
+
+      for (final event in frame.events) {
+        switch (event.phase) {
+          case GesturePhase.began:
+          case GesturePhase.held:
+            _gestures[event.trackId] = event.kind;
+          case GesturePhase.ended:
+            _gestures.remove(event.trackId);
+        }
+      }
+
+      // A track that stopped being reported holds nothing, whatever it was
+      // doing last. Without this a hand leaving the frame would keep its
+      // label on screen forever.
+      final live = {for (final h in frame.hands) h.trackId};
+      _gestures.removeWhere((trackId, _) => !live.contains(trackId));
+
+      for (final command in frame.commands) {
+        _record(command);
+      }
     });
   }
 
@@ -51,23 +84,19 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   /// within a second. The stream stays faithful and the view collapses runs,
   /// showing a count, so nothing is hidden and the list stays legible.
   void _record(CommandRecord record) {
-    if (!mounted) return;
-    setState(() {
-      final last = _log.firstOrNull;
-      if (last != null && last.foldsWith(record)) {
-        last.repeats++;
-        last.lastAt = record.at;
-      } else {
-        _log.insert(0, _LogEntry(record));
-      }
-      if (_log.length > 60) _log.removeRange(60, _log.length);
-    });
+    final last = _log.firstOrNull;
+    if (last != null && last.foldsWith(record)) {
+      last.repeats++;
+      last.lastAt = record.at;
+    } else {
+      _log.insert(0, _LogEntry(record));
+    }
+    if (_log.length > 60) _log.removeRange(60, _log.length);
   }
 
   @override
   void dispose() {
     _frameSub?.cancel();
-    _commandSub?.cancel();
     super.dispose();
   }
 
@@ -102,6 +131,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                       children: [
                         PreviewSurface(
                           hands: hands,
+                          gestures: _gestures,
                           caption: '1280x720 - HD',
                           badge: state.lifecycle == EngineLifecycle.running
                               ? const HcPill(
@@ -129,9 +159,15 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _HandCard(hand: _handFor(hands, Handedness.right)),
+                        _HandCard(
+                          hand: _handFor(hands, Handedness.right),
+                          gestures: _gestures,
+                        ),
                         const SizedBox(height: HcSpace.md),
-                        _HandCard(hand: _handFor(hands, Handedness.left)),
+                        _HandCard(
+                          hand: _handFor(hands, Handedness.left),
+                          gestures: _gestures,
+                        ),
                         const SizedBox(height: HcSpace.md),
                         Expanded(
                           child: _CommandLog(
@@ -488,9 +524,12 @@ class _PipelinePanel extends StatelessWidget {
 
 /// One hand's current state, or an empty slot.
 class _HandCard extends StatelessWidget {
-  const _HandCard({required this.hand});
+  const _HandCard({required this.hand, required this.gestures});
 
   final HandObservation? hand;
+
+  /// What each track holds, from the event stream.
+  final Map<int, GestureKind> gestures;
 
   @override
   Widget build(BuildContext context) {
@@ -514,6 +553,7 @@ class _HandCard extends StatelessWidget {
 
     final color = handColor(h.handedness);
     final weak = h.handednessScore < 0.65;
+    final gesture = gestures[h.trackId];
 
     return HcPanel(
       child: Column(
@@ -550,12 +590,9 @@ class _HandCard extends StatelessWidget {
                 flex: 3,
                 child: HcStat(
                   label: 'GESTURE',
-                  value: h.gesture == GestureKind.none
-                      ? 'None'
-                      : h.gesture.label,
-                  valueColor: h.gesture == GestureKind.none
-                      ? HcColors.textFaint
-                      : HcColors.text,
+                  value: gesture?.label ?? 'None',
+                  valueColor:
+                      gesture == null ? HcColors.textFaint : HcColors.text,
                 ),
               ),
               Expanded(
@@ -577,13 +614,15 @@ class _HandCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const HcLabel('POSE'),
+                    // Presence, not a gesture score. The observation says
+                    // how sure it is that this is a HAND; how sure it is
+                    // about the POSE is the recognizer's business and
+                    // reaches the UI as an event or not at all.
+                    const HcLabel('PRESENCE'),
                     const SizedBox(height: 5),
                     HcConfidence(
-                      value: h.gestureScore,
-                      color: h.gesture == GestureKind.none
-                          ? HcColors.textFaint
-                          : HcColors.accent,
+                      value: h.presence,
+                      color: HcColors.accent,
                     ),
                   ],
                 ),

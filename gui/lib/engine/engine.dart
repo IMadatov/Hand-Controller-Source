@@ -57,8 +57,16 @@ class EngineState {
 
   final EngineLifecycle lifecycle;
 
-  /// Whether input is really being injected. Never inferred from commands
-  /// having been sent — XTest reports success and does nothing on Wayland.
+  /// Whether input is really being injected.
+  ///
+  /// This combines two separate facts, and the distinction is the Wayland
+  /// trap: `Controller::SinkAvailable()` answers whether the ATTACHED SINK
+  /// CAN DELIVER — a logging sink is available and moves no cursor —
+  /// while whether to inject at all is the frontend's own choice. Only
+  /// [SinkStatus.active] means both are true.
+  ///
+  /// Never inferred from commands having been sent. XTest reports success
+  /// and does nothing.
   final SinkStatus sink;
 
   /// Why [sink] is not active, when it is not. Shown verbatim to the user.
@@ -90,11 +98,19 @@ class EngineState {
       );
 }
 
-/// One frame's output: what was seen, and what it cost.
+/// One stepped frame: what was seen, what it meant, and what it cost.
+///
+/// A FRAME IS THE UNIT, not three independent streams. `Controller`'s
+/// `PollObservations` / `PollEvents` / `PollCommands` all report the last
+/// stepped frame and polling twice without stepping returns the same thing —
+/// they are not queues to drain. Bundling them here keeps that true: a UI
+/// cannot accidentally pair this frame's hands with last frame's commands.
 @immutable
 class EngineFrame {
   const EngineFrame({
     required this.hands,
+    required this.events,
+    required this.commands,
     required this.metrics,
     required this.timestampUs,
   });
@@ -104,6 +120,21 @@ class EngineFrame {
   /// An empty list is a NORMAL state, not an error. The user simply has their
   /// hands down, and the UI must render that calmly rather than as a fault.
   final List<HandObservation> hands;
+
+  /// The gestures themselves, INCLUDING ones that matched no binding.
+  ///
+  /// This is where "what is my hand doing" comes from. [commands] is what
+  /// that did, which is a different question and is often empty — an
+  /// unbound pose produces an event and no command, and a UI reading the
+  /// gesture from commands would show nothing while the user holds a fist.
+  final List<GestureEvent> events;
+
+  /// What the mapper produced from [events] this frame.
+  ///
+  /// Reported whether or not a sink is attached, and these are the same
+  /// values a sink would have received. Never instrument a sink to learn
+  /// this — in preview mode there is no sink.
+  final List<CommandRecord> commands;
 
   final EngineMetrics metrics;
   final int timestampUs;
@@ -141,17 +172,30 @@ class CommandRecord {
 }
 
 /// The engine, as this UI sees it.
+///
+/// Shaped after `hc::Controller`, including its constraints:
+///
+/// - **One instance per session.** No singleton and no global state; the
+///   per-hand ROI and the gesture latches are per-session.
+/// - **Driven from one thread.** `Controller` is not thread-safe by design,
+///   like the frame sources under it. Two sessions means two of these.
+/// - **A session with no sink attached is fully supported**, returning
+///   commands as plain data. That is preview mode, not a degraded mode.
+///
+/// The step loop is on this side of the boundary: `Controller::Step()` is
+/// called by the implementation, which then publishes one [EngineFrame].
 abstract interface class HandControllerEngine {
   /// Non-per-frame state. Listenable so the header and the status pill can
   /// rebuild without touching the frame stream.
   ValueListenable<EngineState> get state;
 
-  /// Per-frame observations. Broadcast: the preview, the hand cards and the
-  /// metrics readout all listen.
+  /// One event per stepped frame. Broadcast: the preview, the hand cards,
+  /// the metrics readout and the command log all listen.
+  ///
+  /// There is deliberately no separate command stream. Commands belong to
+  /// the frame that produced them, and splitting them out would invite a
+  /// view that pairs them with the wrong one.
   Stream<EngineFrame> get frames;
-
-  /// Commands as they are produced.
-  Stream<CommandRecord> get commands;
 
   /// Cameras the engine can open.
   Future<List<CameraDevice>> enumerateCameras();
