@@ -68,7 +68,16 @@ target_compile_definitions(test_hand_tracker_two PRIVATE
 )
 target_include_directories(test_hand_tracker_two PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Tests for the app layer. Guarded, because the app layer and OpenCV only
+# hc_cli — argument parsing only, and deliberately OUTSIDE the HC_BUILD_APP
+# guard below. ParseCli links nothing but the standard library, so there is no
+# reason its tests should wait on an OpenCV build; they run in the core-only
+# configure with the rest of the portable code.
+#
+# main() itself is not linked here -- ParseCli lives in its own translation
+# unit precisely so the tests can reach it without pulling in a second main().
+hc_add_test(test_cli test_cli.cpp LIBS hc_cli)
+
+# Tests for the platform layer. Guarded, because hc_platform and OpenCV only
 # exist when HC_BUILD_APP is ON; with it OFF this whole block is skipped and
 # the suite stays buildable with no OpenCV anywhere.
 if(HC_BUILD_APP)
@@ -77,17 +86,12 @@ if(HC_BUILD_APP)
   set(HC_TEST_TMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp")
   file(MAKE_DIRECTORY "${HC_TEST_TMP_DIR}")
 
-  hc_add_test(test_opencv_frame_source test_opencv_frame_source.cpp LIBS hc_app)
+  hc_add_test(test_opencv_frame_source test_opencv_frame_source.cpp LIBS hc_platform)
   target_compile_definitions(test_opencv_frame_source PRIVATE
     HC_TEST_TMP_DIR="${HC_TEST_TMP_DIR}"
   )
 
   # Only DrawObservations is covered. Overlay::Render needs a display and is
   # exercised by Task 14's manual run instead.
-  hc_add_test(test_overlay test_overlay.cpp LIBS hc_app)
-
-  # Argument parsing only. main() itself is not linked here -- ParseCli lives
-  # in its own translation unit precisely so the tests can reach it without
-  # pulling in a second main().
-  hc_add_test(test_cli test_cli.cpp LIBS hc_app)
+  hc_add_test(test_overlay test_overlay.cpp LIBS hc_platform)
 endif()

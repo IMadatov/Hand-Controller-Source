@@ -41,11 +41,17 @@ add_subdirectory(tools)
 add_subdirectory(base)
 add_subdirectory(vision)
 
-# The OpenCV-dependent layer. Guarded so that a core-only configure
-# (-DHC_BUILD_APP=OFF) builds no OpenCV and links none.
+# platform/ is the per-system layer and the only one that links OpenCV, so it
+# is guarded: a core-only configure (-DHC_BUILD_APP=OFF) builds no OpenCV and
+# links none.
 if(HC_BUILD_APP)
-  add_subdirectory(app)
+  add_subdirectory(platform)
 endif()
+
+# app/ is NOT guarded. It declares hc_cli, which is portable and whose tests
+# should run in the fast core-only configure; the hand_controller executable
+# inside it guards itself on HC_BUILD_APP.
+add_subdirectory(app)
 
 enable_testing()
 add_subdirectory(tests)
