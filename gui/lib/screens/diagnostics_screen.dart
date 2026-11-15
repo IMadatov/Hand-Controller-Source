@@ -128,17 +128,19 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     // symptom a user would report — "nothing happens when I point" — leads
     // here.
     if (state.sink == SinkStatus.unavailable) {
+      // The engine's own message is the instruction, verbatim and in full —
+      // it names the device, the errno and the exact udev commands. Adding
+      // generic advice beside it would eventually contradict it, which is
+      // what happened when this card still recommended switching to X11
+      // after the uinput sink made that unnecessary.
       findings.add(_Finding(
         severity: _Severity.critical,
         title: 'Input backend unavailable',
         detail: state.sinkReason ??
             'Commands are being produced and discarded. Nothing you do with '
                 'your hands will reach the desktop.',
-        fixes: [
-          'Log out and choose an X11 session ("GNOME on Xorg" or similar) '
-              'at the login screen.',
-          'Or install a Wayland input backend and enable its daemon.',
-          'Until then, Live View still shows what WOULD be sent.',
+        fixes: const [
+          'Tracking still works. Live View shows exactly what WOULD be sent.',
         ],
       ));
     } else if (state.sink == SinkStatus.observeOnly) {
