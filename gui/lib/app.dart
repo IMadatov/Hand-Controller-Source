@@ -11,6 +11,7 @@ import 'state/bindings_controller.dart';
 import 'theme/app_theme.dart';
 import 'theme/tokens.dart';
 import 'widgets/common.dart';
+import 'widgets/title_bar.dart';
 
 /// Hands the engine down the tree.
 ///
@@ -141,19 +142,28 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: Row(
+        body: Column(
           children: [
-            _Sidebar(
-              current: _section,
-              onSelect: (s) => setState(() => _section = s),
-            ),
+            // The window has no system title bar; this is it. See
+            // `widgets/title_bar.dart`.
+            const TitleBar(sidebarWidth: _Sidebar.width),
             Expanded(
-              child: switch (_section) {
-                AppSection.live => const LiveViewScreen(),
-                AppSection.bindings => const BindingsScreen(),
-                AppSection.settings => const SettingsScreen(),
-                AppSection.diagnostics => const DiagnosticsScreen(),
-              },
+              child: Row(
+                children: [
+                  _Sidebar(
+                    current: _section,
+                    onSelect: (s) => setState(() => _section = s),
+                  ),
+                  Expanded(
+                    child: switch (_section) {
+                      AppSection.live => const LiveViewScreen(),
+                      AppSection.bindings => const BindingsScreen(),
+                      AppSection.settings => const SettingsScreen(),
+                      AppSection.diagnostics => const DiagnosticsScreen(),
+                    },
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -166,9 +176,12 @@ class _Sidebar extends StatelessWidget {
   final AppSection current;
   final ValueChanged<AppSection> onSelect;
 
+  /// Fixed, and shared with the title bar so the two line up exactly.
+  static const width = 208.0;
+
   @override
   Widget build(BuildContext context) => Container(
-        width: 208,
+        width: width,
         decoration: const BoxDecoration(
           color: HcColors.surface,
           border: Border(right: BorderSide(color: HcColors.border)),
