@@ -34,6 +34,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   /// gesture rather than smoothed over.
   final _gestures = <int, GestureKind>{};
   final _log = <_LogEntry>[];
+
   /// Null while enumeration is still in flight. An empty list means the
   /// machine genuinely has no camera, and the two must not look alike.
   List<CameraDevice>? _cameras;
@@ -145,10 +146,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                         _CameraRow(cameras: _cameras, state: state),
                         const SizedBox(height: HcSpace.lg),
                         Expanded(
-                          child: _PipelinePanel(
-                            metrics: metrics,
-                            state: state,
-                          ),
+                          child: _PipelinePanel(metrics: metrics, state: state),
                         ),
                       ],
                     ),
@@ -288,7 +286,8 @@ class _InjectSwitch extends StatelessWidget {
     final failed = state.sink == SinkStatus.unavailable;
 
     return Tooltip(
-      message: state.sinkReason ??
+      message:
+          state.sinkReason ??
           (on
               ? 'Gestures move the real cursor'
               : 'Gestures are shown but nothing is sent'),
@@ -305,18 +304,18 @@ class _InjectSwitch extends StatelessWidget {
             ),
           ),
           const SizedBox(width: HcSpace.xs),
-          Switch(
-            value: on,
-            onChanged: (v) => engine.setInjectInput(v),
-          ),
+          Switch(value: on, onChanged: (v) => engine.setInjectInput(v)),
 
           // Asking to inject and succeeding are different things, and XTest
           // fails silently. The switch being on is not evidence.
           if (failed)
             const Padding(
               padding: EdgeInsets.only(left: HcSpace.xs),
-              child: Icon(Icons.error_outline,
-                  size: 15, color: HcColors.danger),
+              child: Icon(
+                Icons.error_outline,
+                size: 15,
+                color: HcColors.danger,
+              ),
             ),
         ],
       ),
@@ -337,16 +336,21 @@ class _CameraRow extends StatelessWidget {
     if (found == null) {
       return const HcPanel(
         padding: EdgeInsets.symmetric(
-            horizontal: HcSpace.lg, vertical: HcSpace.md),
+          horizontal: HcSpace.lg,
+          vertical: HcSpace.md,
+        ),
         child: Row(
           children: [
             Icon(Icons.search, size: 15, color: HcColors.textFaint),
             SizedBox(width: HcSpace.md),
-            Text('Looking for cameras', style: TextStyle(
-              fontFamily: HcFont.sans,
-              fontSize: 12,
-              color: HcColors.textFaint,
-            )),
+            Text(
+              'Looking for cameras',
+              style: TextStyle(
+                fontFamily: HcFont.sans,
+                fontSize: 12,
+                color: HcColors.textFaint,
+              ),
+            ),
           ],
         ),
       );
@@ -357,17 +361,25 @@ class _CameraRow extends StatelessWidget {
       // path and must read as a plain fact rather than a crash.
       return const HcPanel(
         padding: EdgeInsets.symmetric(
-            horizontal: HcSpace.lg, vertical: HcSpace.md),
+          horizontal: HcSpace.lg,
+          vertical: HcSpace.md,
+        ),
         child: Row(
           children: [
-            Icon(Icons.videocam_off_outlined,
-                size: 15, color: HcColors.textFaint),
+            Icon(
+              Icons.videocam_off_outlined,
+              size: 15,
+              color: HcColors.textFaint,
+            ),
             SizedBox(width: HcSpace.md),
-            Text('No camera found', style: TextStyle(
-              fontFamily: HcFont.sans,
-              fontSize: 12,
-              color: HcColors.textMuted,
-            )),
+            Text(
+              'No camera found',
+              style: TextStyle(
+                fontFamily: HcFont.sans,
+                fontSize: 12,
+                color: HcColors.textMuted,
+              ),
+            ),
           ],
         ),
       );
@@ -377,11 +389,16 @@ class _CameraRow extends StatelessWidget {
 
     return HcPanel(
       padding: const EdgeInsets.symmetric(
-          horizontal: HcSpace.lg, vertical: HcSpace.sm),
+        horizontal: HcSpace.lg,
+        vertical: HcSpace.sm,
+      ),
       child: Row(
         children: [
-          const Icon(Icons.videocam_outlined,
-              size: 15, color: HcColors.textFaint),
+          const Icon(
+            Icons.videocam_outlined,
+            size: 15,
+            color: HcColors.textFaint,
+          ),
           const SizedBox(width: HcSpace.md),
           Expanded(
             child: DropdownButtonHideUnderline(
@@ -391,8 +408,11 @@ class _CameraRow extends StatelessWidget {
                 isExpanded: true,
                 dropdownColor: HcColors.surfaceRaised,
                 borderRadius: BorderRadius.circular(HcRadius.md),
-                icon: const Icon(Icons.expand_more,
-                    size: 16, color: HcColors.textFaint),
+                icon: const Icon(
+                  Icons.expand_more,
+                  size: 16,
+                  color: HcColors.textFaint,
+                ),
                 items: [
                   for (final camera in found)
                     DropdownMenuItem(
@@ -460,9 +480,7 @@ class _PipelinePanel extends StatelessWidget {
                 child: HcStat(
                   label: 'FRAME RATE',
                   mono: true,
-                  value: live
-                      ? '${metrics.fps.toStringAsFixed(1)} fps'
-                      : '--',
+                  value: live ? '${metrics.fps.toStringAsFixed(1)} fps' : '--',
                   valueColor: slow ? HcColors.warn : HcColors.text,
                 ),
               ),
@@ -531,22 +549,48 @@ class _HandCard extends StatelessWidget {
   /// What each track holds, from the event stream.
   final Map<int, GestureKind> gestures;
 
+  /// FIXED, and the same in both states.
+  ///
+  /// The tracker loses and reacquires a hand from one frame to the next, so
+  /// this card swaps between "no hand" and a full readout many times a
+  /// second. Letting it size itself made the whole column jump by ~40px at
+  /// that rate, which is unreadable and looks broken even though the engine
+  /// is behaving correctly.
+  ///
+  /// Reserving the taller layout costs a little empty space when no hand is
+  /// present and buys a column that never moves. The flicker in the TEXT is
+  /// still there, because it is the truth — it is the geometry that had to
+  /// stop moving.
+  // 100, not a round 96: the tracked layout measures 100 and the
+  // renderer says so loudly if this is short.
+  static const _height = 100.0;
+
   @override
   Widget build(BuildContext context) {
     final h = hand;
     if (h == null) {
       // Absence of a hand is a NORMAL state, not an error. Rendered quietly.
-      return const HcPanel(
-        child: Row(
-          children: [
-            Icon(Icons.pan_tool_outlined, size: 16, color: HcColors.textFaint),
-            SizedBox(width: HcSpace.md),
-            Text('No hand in frame', style: TextStyle(
-              fontFamily: HcFont.sans,
-              fontSize: 12,
-              color: HcColors.textFaint,
-            )),
-          ],
+      return const SizedBox(
+        height: _height,
+        child: HcPanel(
+          child: Row(
+            children: [
+              Icon(
+                Icons.pan_tool_outlined,
+                size: 16,
+                color: HcColors.textFaint,
+              ),
+              SizedBox(width: HcSpace.md),
+              Text(
+                'No hand in frame',
+                style: TextStyle(
+                  fontFamily: HcFont.sans,
+                  fontSize: 12,
+                  color: HcColors.textFaint,
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -555,81 +599,87 @@ class _HandCard extends StatelessWidget {
     final weak = h.handednessScore < 0.65;
     final gesture = gestures[h.trackId];
 
-    return HcPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              HandBadge(h.handedness),
-              const SizedBox(width: HcSpace.md),
-              Text(
-                '${h.handedness.label} hand',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const Spacer(),
+    return SizedBox(
+      height: _height,
+      child: HcPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                HandBadge(h.handedness),
+                const SizedBox(width: HcSpace.md),
+                Text(
+                  '${h.handedness.label} hand',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const Spacer(),
 
-              // A weak handedness score is called out, because it is the
-              // reason a left-hand binding may not fire for what looks to
-              // the user like a left hand.
-              if (weak)
-                HcPill(
-                  label: 'low confidence',
-                  color: HcColors.warn,
-                  background: HcColors.warnBackground,
-                )
-              else
-                HcPill(label: 'tracked', color: color),
-            ],
-          ),
-          const SizedBox(height: HcSpace.lg),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 3,
-                child: HcStat(
-                  label: 'GESTURE',
-                  value: gesture?.label ?? 'None',
-                  valueColor:
-                      gesture == null ? HcColors.textFaint : HcColors.text,
-                ),
-              ),
-              Expanded(
-                flex: 2,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const HcLabel('HAND LABEL'),
-                    const SizedBox(height: 5),
-                    HcConfidence(
-                      value: h.handednessScore,
-                      color: weak ? HcColors.warn : color,
+                // A weak handedness score is called out, because it is the
+                // reason a left-hand binding may not fire for what looks to
+                // the user like a left hand.
+                if (weak)
+                  HcPill(
+                    label: 'low confidence',
+                    color: HcColors.warn,
+                    background: HcColors.warnBackground,
+                  )
+                else
+                  HcPill(label: 'tracked', color: color),
+              ],
+            ),
+            const SizedBox(height: HcSpace.lg),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: Tooltip(
+                    message: gesture?.label ?? 'No gesture',
+                    child: HcStat(
+                      // The short form, because the long one does not fit this
+                      // column and an ellipsis tells the user nothing.
+                      label: 'GESTURE',
+                      value: gesture?.shortLabel ?? 'None',
+                      valueColor: gesture == null
+                          ? HcColors.textFaint
+                          : HcColors.text,
                     ),
-                  ],
+                  ),
                 ),
-              ),
-              Expanded(
-                flex: 2,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Presence, not a gesture score. The observation says
-                    // how sure it is that this is a HAND; how sure it is
-                    // about the POSE is the recognizer's business and
-                    // reaches the UI as an event or not at all.
-                    const HcLabel('PRESENCE'),
-                    const SizedBox(height: 5),
-                    HcConfidence(
-                      value: h.presence,
-                      color: HcColors.accent,
-                    ),
-                  ],
+                Expanded(
+                  flex: 2,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const HcLabel('HAND LABEL'),
+                      const SizedBox(height: 5),
+                      HcConfidence(
+                        value: h.handednessScore,
+                        color: weak ? HcColors.warn : color,
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
+                Expanded(
+                  flex: 2,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Presence, not a gesture score. The observation says
+                      // how sure it is that this is a HAND; how sure it is
+                      // about the POSE is the recognizer's business and
+                      // reaches the UI as an event or not at all.
+                      const HcLabel('PRESENCE'),
+                      const SizedBox(height: 5),
+                      HcConfidence(value: h.presence, color: HcColors.accent),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -646,7 +696,8 @@ class _LogEntry {
   /// Only continuous commands fold. A click must never be folded: two clicks
   /// are not one click, and collapsing them would hide a double fire.
   bool foldsWith(CommandRecord other) {
-    final continuous = record.command.kind == CommandKind.moveCursor ||
+    final continuous =
+        record.command.kind == CommandKind.moveCursor ||
         record.command.kind == CommandKind.scroll;
     return continuous &&
         other.command.kind == record.command.kind &&
@@ -666,46 +717,47 @@ class _CommandLog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => HcPanel(
-        padding: const EdgeInsets.all(HcSpace.md),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  HcSpace.xs, HcSpace.xs, HcSpace.xs, HcSpace.md),
-              child: Row(
-                children: [
-                  const HcLabel('COMMAND LOG'),
-                  const Spacer(),
-                  if (!delivering)
-                    const HcPill(
-                      label: 'not sent',
-                      color: HcColors.textMuted,
-                    ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: entries.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'Nothing yet',
-                        style: TextStyle(
-                          fontFamily: HcFont.sans,
-                          fontSize: 12,
-                          color: HcColors.textFaint,
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: EdgeInsets.zero,
-                      itemCount: entries.length,
-                      itemBuilder: (context, i) => _LogRow(entry: entries[i]),
-                    ),
-            ),
-          ],
+    padding: const EdgeInsets.all(HcSpace.md),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HcSpace.xs,
+            HcSpace.xs,
+            HcSpace.xs,
+            HcSpace.md,
+          ),
+          child: Row(
+            children: [
+              const HcLabel('COMMAND LOG'),
+              const Spacer(),
+              if (!delivering)
+                const HcPill(label: 'not sent', color: HcColors.textMuted),
+            ],
+          ),
         ),
-      );
+        Expanded(
+          child: entries.isEmpty
+              ? const Center(
+                  child: Text(
+                    'Nothing yet',
+                    style: TextStyle(
+                      fontFamily: HcFont.sans,
+                      fontSize: 12,
+                      color: HcColors.textFaint,
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  padding: EdgeInsets.zero,
+                  itemCount: entries.length,
+                  itemBuilder: (context, i) => _LogRow(entry: entries[i]),
+                ),
+        ),
+      ],
+    ),
+  );
 }
 
 class _LogRow extends StatelessWidget {
@@ -718,13 +770,13 @@ class _LogRow extends StatelessWidget {
     final record = entry.record;
     final color = handColor(record.handedness);
     final at = entry.lastAt;
-    final clock = '${at.hour.toString().padLeft(2, '0')}:'
+    final clock =
+        '${at.hour.toString().padLeft(2, '0')}:'
         '${at.minute.toString().padLeft(2, '0')}:'
         '${at.second.toString().padLeft(2, '0')}';
 
     return Padding(
-      padding: const EdgeInsets.symmetric(
-          horizontal: HcSpace.xs, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: HcSpace.xs, vertical: 3),
       child: Row(
         children: [
           Text(

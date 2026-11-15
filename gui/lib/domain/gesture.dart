@@ -18,24 +18,32 @@ enum GestureKind {
   /// Not a gesture, and never emitted in a [GestureEvent]. It exists so that
   /// "no gesture is active" is representable without a null, and is rejected
   /// as a binding target.
-  none('none', 'None'),
+  none('none', 'None', 'None'),
 
-  pinch('pinch', 'Thumb + index pinch'),
-  fist('fist', 'Fist'),
-  openPalm('open_palm', 'Open palm'),
-  pointIndex('point_index', 'Index finger only'),
-  twoFingers('two_fingers', 'Index + middle'),
-  thumbUp('thumb_up', 'Thumb only'),
-  pinkyOnly('pinky_only', 'Pinky only'),
-  fourFingers('four_fingers', 'Four fingers, thumb folded');
+  pinch('pinch', 'Thumb + index pinch', 'Pinch'),
+  fist('fist', 'Fist', 'Fist'),
+  openPalm('open_palm', 'Open palm', 'Open palm'),
+  pointIndex('point_index', 'Index finger only', 'Index only'),
+  twoFingers('two_fingers', 'Index + middle', 'Two fingers'),
+  thumbUp('thumb_up', 'Thumb only', 'Thumb'),
+  pinkyOnly('pinky_only', 'Pinky only', 'Pinky'),
+  fourFingers('four_fingers', 'Four fingers, thumb folded', 'Four fingers');
 
-  const GestureKind(this.wire, this.label);
+  const GestureKind(this.wire, this.label, this.shortLabel);
 
   /// The name used in the bindings file. Do not reword.
   final String wire;
 
-  /// What a user reads. Free to change, translate, and reword.
+  /// What a user reads where there is room — the bindings editor, where the
+  /// row is wide and the pose has to be unambiguous.
   final String label;
+
+  /// For the narrow places: the hand cards and the tray overlay.
+  ///
+  /// A truncated label with an ellipsis tells the user nothing; a shorter
+  /// one that fits tells them the pose. The long form is still available as
+  /// a tooltip wherever this is used.
+  final String shortLabel;
 
   /// The kinds a user may actually bind — everything except [none].
   static List<GestureKind> get bindable =>

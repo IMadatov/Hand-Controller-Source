@@ -213,7 +213,8 @@ class _HandLine extends StatelessWidget {
             const SizedBox(width: HcSpace.sm),
             Expanded(
               child: Text(
-                gesture?.label ?? (h == null ? 'Not in frame' : 'No gesture'),
+                gesture?.shortLabel ??
+                    (h == null ? 'Not in frame' : 'No gesture'),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
