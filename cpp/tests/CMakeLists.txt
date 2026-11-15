@@ -55,6 +55,8 @@ target_compile_definitions(test_bindings PRIVATE
 )
 
 hc_add_test(test_action_mapper test_action_mapper.cpp LIBS hc_control)
+hc_add_test(test_output_sink test_output_sink.cpp LIBS hc_control)
+hc_add_test(test_queued_sink test_queued_sink.cpp LIBS hc_control)
 
 # hc_vision_ort — the ONNX Runtime backend, and the only tests that load
 # real model files.

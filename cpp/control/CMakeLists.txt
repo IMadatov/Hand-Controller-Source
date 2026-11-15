@@ -16,6 +16,8 @@ add_library(hc_control STATIC
   src/command.cpp
   src/bindings.cpp
   src/action_mapper.cpp
+  src/logging_sink.cpp
+  src/queued_sink.cpp
 )
 
 target_include_directories(hc_control PUBLIC
@@ -45,7 +47,10 @@ target_include_directories(hc_control PRIVATE
 
 # hc_vision for HandObservation and HandFeatures, which are the layer's whole
 # input. PUBLIC because they appear in hc_control's own signatures.
-target_link_libraries(hc_control PUBLIC hc_vision)
+# Threads for QueuedSink's worker. Threads::Threads is a CMake-provided
+# imported target, not a forbidden dependency.
+find_package(Threads REQUIRED)
+target_link_libraries(hc_control PUBLIC hc_vision Threads::Threads)
 
 hc_assert_no_forbidden_deps(hc_control)
 

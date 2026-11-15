@@ -30,6 +30,27 @@ The spec's environment survey is stale. These were re-measured on 2026-11-14 and
 
 > **This is the single most dangerous fact in this plan.** XTest fails *silently*: it returns success and does nothing. An `OutputSink` built on it will pass every test that does not check the real cursor position, and will do nothing on the desktop. Task 9 therefore requires a test that reads the pointer back, not one that merely checks the call returned.
 
+### Re-probed 2026-11-15, before Tasks 7–8: STILL WAYLAND, XTest still silently dead
+
+The switch to X11 has **not happened yet**. Measured, not assumed — the probe is now committed as `cpp/tools/xtest_probe.cpp`, so this is repeatable rather than a claim in a document:
+
+```
+$ ./cpp/build/bin/xtest_probe
+XTestQueryExtension: present=1 version=2.2
+pointer before: 1920,540
+XTestFakeMotionEvent returned 1 (asked for 2057,631)
+pointer after:  1920,540
+RESULT: XTest SILENTLY DID NOTHING (returned success, no move)
+```
+
+`XDG_SESSION_TYPE=wayland`, `WAYLAND_DISPLAY=wayland-0`, `loginctl Type=wayland`, and `DISPLAY=:0` is XWayland (`Xwayland :0 -rootless ... -enable-ei-portal`). `libXtst.so.6` and `libX11.so.6` are both present, the extension answers at version 2.2, and the call returns 1 for success. **Every signal short of reading the pointer back says it works.**
+
+**Consequence for sequencing: Task 9 is BLOCKED and must not be started on this machine as it stands.** Tasks 7, 8, 10 and 11 are not blocked — the null sink, the logging sink, the queue and the controller are all testable with no display at all, which is why they come first.
+
+Two ways forward when Task 9 is reached, and the choice is the owner's:
+- **Log into an X11 session** and re-run the probe until it prints `ACTUALLY MOVES`. This is what the plan assumes.
+- **Target Wayland properly** via `libei` — note the running XWayland already carries `-enable-ei-portal`. This is explicitly out of phase 2 scope and is a larger piece of work than Task 9.
+
 Unchanged from phase 1 and still binding: **no camera** (`/dev/video*` absent), **no FFmpeg and no GStreamer** (video fixtures must be MJPG-in-AVI), and `cpp/build-app` holds a 528 MB OpenCV build that must not be reconfigured from scratch.
 
 ---
@@ -493,6 +514,54 @@ TEST(QueuedSink, CountsDropsForReporting) { }
 
 - [ ] **Step 2–4.** Run under **TSan** as well as ASan — this is the second threaded component in the project, and phase 1's `LatestFrameSource` set the precedent of a TSan pass.
 - [ ] **Step 5: Commit** — `feat: non-blocking queued output sink with undroppable releases`
+
+### How Tasks 7 and 8 landed
+
+**The null, logging and queued sinks are in `hc_control`, not `platform/`.** The
+plan files them under `platform/src/` and `app/src/`, but none of the three
+contains a single platform API: two are a dozen lines of bookkeeping and the
+third is a `std::thread` with a mutex. Filing them in `platform/` would have
+chained the `--no-inject` default path — the one the application runs by
+default — to OpenCV, along with every headless, server and browser
+configuration, which are precisely the builds that must not require it. Only
+the X11 and `SendInput` sinks of Tasks 9 and 10 belong in `platform/`.
+
+`hc_control` therefore links `Threads::Threads` now. That is a CMake imported
+target, not a forbidden dependency, and `hc_assert_no_forbidden_deps` still
+passes.
+
+**A defect was found in `QueuedSink` during Task 8, and it is worth recording
+because the obvious implementation is the wrong one.** "Drop the oldest when
+full", written as `queue_.pop_front()`, drops the oldest item
+*unconditionally* — so once a `KeyRelease` is sitting in the queue, the next
+burst of cursor motion evicts it and the key stays down. The undroppable rule
+has to be enforced on **eviction**, not only on insertion: the eviction scan
+skips undroppable entries and takes the oldest droppable one.
+
+The `NeverDropsAReleaseCommand` test this plan specifies does **not** catch
+it, because it sends the release *last*. The bug surfaced by accident in a
+concurrent-senders test, which lost exactly one release out of four. A
+deterministic `AQueuedReleaseSurvivesLaterEvictions` test was added and
+verified by reverting the fix: it fails, while both of the plan's release
+tests still pass.
+
+Beyond the plan's interface: `Drain(timeout)`, because a test cannot otherwise
+know when an asynchronous sink has caught up; every blocking wait bounded by
+`kShutdownTimeout`, so a wedged inner sink cannot hang the process on exit;
+and `Available()` sampled from the inner sink **once, at construction**, since
+the inner sink is touched only by the worker thread and asking it anything
+from the caller's thread would be a data race.
+
+One limitation recorded rather than fixed: because motion is relative, an
+evicted delta is displacement the cursor never travels, so sustained overload
+**under-moves** the cursor rather than lagging it. Coalescing consecutive
+motion commands by summing their deltas would preserve the total exactly. It
+is not done because overload is not expected — an XTest call is microseconds,
+and the 100 ms figure that motivated this class was pyautogui's artificial
+`PAUSE` — and `DroppedCount()` is what would show that assumption to be wrong.
+
+TSan pass: `test_queued_sink`, `test_output_sink` and phase 1's
+`test_frame_source` all clean under `-fsanitize=thread` with g++.
 
 ---
 
