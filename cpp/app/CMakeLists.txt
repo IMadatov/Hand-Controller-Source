@@ -17,13 +17,15 @@ target_include_directories(hc_app PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-# hc_core is PUBLIC because hc_app's own headers expose core types in their
-# signatures (IFrameSource, Frame, ImageView). hc::opencv likewise, since
-# cv::VideoCapture and cv::Mat appear as members of OpenCvFrameSource.
+# hc_vision_ort is PUBLIC because hc_app's own headers expose lower-layer
+# types in their signatures (IFrameSource, Frame, ImageView, HandObservation),
+# and linking it transitively carries hc_vision and hc_base. hc::opencv
+# likewise, since cv::VideoCapture and cv::Mat appear as members of
+# OpenCvFrameSource.
 #
-# This is the one target in the project allowed to do this; hc_core itself is
-# checked by hc_assert_no_forbidden_deps and must stay OpenCV-free.
-target_link_libraries(hc_app PUBLIC hc_core hc::opencv)
+# This is the one layer in the project allowed to link OpenCV; every target
+# below it is checked by hc_assert_no_forbidden_deps and must stay free of it.
+target_link_libraries(hc_app PUBLIC hc_vision_ort hc::opencv)
 
 # The executable. Only main.cpp: everything else it needs is in hc_app,
 # which is the same code the tests link.

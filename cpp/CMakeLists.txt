@@ -25,7 +25,21 @@ option(HC_BUILD_APP "Build the OpenCV-based application target" ON)
 include(cmake/FetchOpenCV.cmake)
 
 add_subdirectory(tools)
-add_subdirectory(core)
+
+# Added bottom-up, in dependency order, so each hc_assert_does_not_link check
+# sees the targets below it already defined.
+#
+#   base/    hc_base        primitives: geometry, image types, metrics, frame
+#                           sources. No ONNX, no OS, no OpenCV.
+#   vision/  hc_vision      the standalone hand-detection module: anchors,
+#                           palm decode, ROI, warp, association, features.
+#            hc_vision_ort  its ONNX Runtime backend, the only ORT consumer.
+#
+# control/ (hc_control: gesture recognition and mapping) arrives with the
+# phase 2 gesture tasks. It is deliberately not declared yet -- an empty
+# static library is a placeholder pretending to be a boundary.
+add_subdirectory(base)
+add_subdirectory(vision)
 
 # The OpenCV-dependent layer. Guarded so that a core-only configure
 # (-DHC_BUILD_APP=OFF) builds no OpenCV and links none.
@@ -35,3 +49,8 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# Last, deliberately. Every hc_assert_* call above only registered an
+# assertion; this is where they run, now that the link graph is final and no
+# later target_link_libraries can sneak in behind them.
+hc_run_layer_checks()

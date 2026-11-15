@@ -23,20 +23,29 @@ function(hc_add_test name)
   gtest_discover_tests(${name})
 endfunction()
 
-hc_add_test(test_geometry test_geometry.cpp LIBS hc_core)
-hc_add_test(test_metrics test_metrics.cpp LIBS hc_core)
-hc_add_test(test_warp test_warp.cpp LIBS hc_core)
-hc_add_test(test_anchors test_anchors.cpp LIBS hc_core)
-hc_add_test(test_palm_decode test_palm_decode.cpp LIBS hc_core)
-hc_add_test(test_roi test_roi.cpp LIBS hc_core)
-hc_add_test(test_association test_association.cpp LIBS hc_core)
-hc_add_test(test_frame_source test_frame_source.cpp LIBS hc_core)
+# Every test links the NARROWEST target that satisfies it, never a convenient
+# superset. That is what makes the module split verifiable rather than
+# decorative: if a unit quietly grows a dependency on a higher layer, its own
+# test stops linking, and it does so here rather than in a code review.
 
-# Phase 2. Pure core: no OpenCV, no OS, so these build and run with
-# -DHC_BUILD_APP=OFF like everything else in hc_core.
-hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_core)
+# hc_base — the primitives. These link no inference runtime at all.
+hc_add_test(test_geometry test_geometry.cpp LIBS hc_base)
+hc_add_test(test_metrics test_metrics.cpp LIBS hc_base)
+hc_add_test(test_frame_source test_frame_source.cpp LIBS hc_base)
 
-hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_core)
+# hc_vision — the detection algorithms. Linking these against hc_vision
+# rather than hc_vision_ort is the standing proof that they need no ONNX
+# Runtime, which is the precondition for the WebAssembly port.
+hc_add_test(test_warp test_warp.cpp LIBS hc_vision)
+hc_add_test(test_anchors test_anchors.cpp LIBS hc_vision)
+hc_add_test(test_palm_decode test_palm_decode.cpp LIBS hc_vision)
+hc_add_test(test_roi test_roi.cpp LIBS hc_vision)
+hc_add_test(test_association test_association.cpp LIBS hc_vision)
+hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_vision)
+
+# hc_vision_ort — the ONNX Runtime backend, and the only tests that load
+# real model files.
+hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)
 # The tracker tests are the only ones that touch real model files and the
 # committed image fixture, so the paths are injected here rather than being
 # hardcoded in the test source. HC_PALM_MODEL / HC_LANDMARK_MODEL are the
@@ -51,7 +60,7 @@ target_include_directories(test_hand_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 # Task 10's two-hand tests need exactly the same injected paths: the same
 # models, and the same committed fixture (which they composite into
 # multi-hand frames via fixture_image.hpp).
-hc_add_test(test_hand_tracker_two test_hand_tracker_two.cpp LIBS hc_core)
+hc_add_test(test_hand_tracker_two test_hand_tracker_two.cpp LIBS hc_vision_ort)
 target_compile_definitions(test_hand_tracker_two PRIVATE
   HC_PALM_MODEL_PATH="${HC_PALM_MODEL}"
   HC_LANDMARK_MODEL_PATH="${HC_LANDMARK_MODEL}"
