@@ -153,16 +153,54 @@ silently discards every event is worse than one that shows nothing.
 
 ---
 
-## 4. What the GUI is still blocked on
+## 4. `Controller` has landed — build the mock against this shape
 
-`Controller` (Task 11) and the `extern "C"` shim over it. Nothing in this
-document unblocks live preview, real start/stop, real bindings I/O, or the
-metrics panel. The shim is not written until Task 11 lands, because there is
-nothing stable to wrap.
+Task 11 is done (`cpp/control/include/hc/controller.hpp`). The `extern "C"`
+shim over it is still unwritten and still out of phase 2 scope, so the GUI
+remains on `MockEngine` for now — but the shape the mock should imitate is no
+longer a guess:
 
-Two guarantees the mock should be built against, because they will hold:
+```cpp
+Controller(source, tracker, sink /* may be null */, ControllerConfig, Metrics*)
 
-- One `Controller` per session. No singleton, no global state.
-- A `Controller` with **no sink attached is a fully supported configuration**.
-  It returns `Command`s as plain data. That is the GUI's preview mode: show
-  the gesture, move nothing. It is not a hack.
+bool Start();                  // false if already running or already stopped
+bool Step();                   // one frame; false when the session is over
+void Stop();                   // releases every held key, then closes
+
+void PollObservations(std::vector<HandObservation>&) const;
+void PollCommands(std::vector<Command>&) const;
+void PollEvents(std::vector<GestureEvent>&) const;
+const Frame& LastFrame() const;
+
+void SetBindings(BindingSet);  // mid-session, no restart
+bool SinkAvailable() const;
+std::uint64_t ProcessedFrames() const;
+```
+
+Five properties worth encoding in `MockEngine`, each pinned by a test:
+
+1. **`Poll*` is not a queue.** It reports the LAST stepped frame, and polling
+   twice without stepping returns the same thing. A GUI that treats it as a
+   drain will show each frame once and then nothing.
+2. **Commands are reported whether or not a sink is attached**, and they are
+   the same values the sink received. Render "what the gesture did" from
+   `PollCommands`, never by instrumenting a sink — in preview mode there
+   isn't one.
+3. **`PollEvents` is the gesture itself**, including events that matched no
+   binding. Live View's "current gesture" belongs here; `PollCommands` is its
+   effect, which is a different thing and is often empty.
+4. **`SinkAvailable()` is not "injecting".** It answers whether the attached
+   sink can deliver. A logging sink is available and moves no cursor. Whether
+   a sink injects is the frontend's own knowledge — see §3 Q3 on why blurring
+   these two is the Wayland trap.
+5. **One instance per session, driven from one thread.** Not thread-safe by
+   design, like the frame sources under it. Two sessions means two
+   `Controller`s.
+
+And the guarantee that has not changed: a `Controller` with **no sink attached
+is a fully supported configuration**, returning `Command`s as plain data. That
+is preview mode — show the gesture, move nothing. It is not a hack.
+
+The CLI frontend is the worked example to read:
+`cpp/app/src/main.cpp` is now composition, the preview window and the report,
+and nothing else.
