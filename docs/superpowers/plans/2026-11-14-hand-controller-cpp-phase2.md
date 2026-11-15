@@ -7,7 +7,7 @@ Depends on: phase 1, complete at commit `70e897b`.
 
 **Goal:** Build `GestureRecognizer` → `ActionMapper` → `OutputSink` on top of the phase 1 tracker, reaching mouse-control feature parity with `main.py` — cursor movement, left click, double click, scroll, and the left-hand arrow-key and print-screen bindings — but with **two hands tracked simultaneously and fully independent per-hand state**, and with the gesture-to-command bindings customizable through configuration rather than code edits.
 
-**Architecture:** Three new layers, each a plain-data boundary, added to `hc_core` except the sinks. `GestureRecognizer` and `ActionMapper` are portable core: no OS, no OpenCV, no clock they do not receive as an argument. `OutputSink` is a platform adapter behind a queue, because injection can block and must never stall the frame loop. The application shell wires them; no layer holds a reference to the type of the layer after it.
+**Architecture:** Three new layers, each a plain-data boundary, added to `hc_control` except the sinks, which are `hc_platform`. (The amendment of 2026-11-15 below replaced `hc_core` with the module split this describes; read task file paths through it.) `GestureRecognizer` and `ActionMapper` are portable core: no OS, no OpenCV, no clock they do not receive as an argument. `OutputSink` is a platform adapter behind a queue, because injection can block and must never stall the frame loop. The application shell wires them; no layer holds a reference to the type of the layer after it.
 
 **Tech Stack:** Unchanged from phase 1 — C++17, CMake + Ninja, clang, GoogleTest. **No new fetched dependencies.** The X11 sink reaches `libXtst` by `dlopen` rather than by linking (see Global Constraints).
 
@@ -40,7 +40,8 @@ Every task's requirements implicitly include this section.
 
 - **C++17.** Chosen for Android NDK compatibility; do not use C++20 features.
 - **`GestureRecognizer` and `ActionMapper` are pure.** No OS calls, no I/O, no OpenCV, no clock they do not receive as an argument. Both must be fully unit-testable from synthetic landmark sequences with no camera and no display. If a test for either needs a display, the design is wrong.
-- **`hc_core` must link neither OpenCV nor X11.** Enforced at configure time by `hc_assert_no_forbidden_deps`. The sinks live in the app layer.
+- **No target below `hc_platform` may link OpenCV or X11.** Enforced at configure time by `hc_assert_no_forbidden_deps`. The sinks live in `platform/`.
+- **New core code goes in `hc_control`, not `hc_vision`.** `hc_core` no longer exists; see the module amendment below.
 - **The core speaks normalized `0.0..1.0` coordinates, never pixels.** Phase 1 established that `DrawObservations` is the only place that multiplies by pixel dimensions. **`OutputSink` becomes the second**, since screen coordinates are pixels — and it is the only other one permitted. `ActionMapper` emits relative, normalized motion.
 - **A clean `git clone` plus `cmake` must be enough.** No system packages, no `vcpkg`, no `conan`. **Consequence for the X11 sink:** linking `-lXtst` would add a build-time system dependency and break this rule, and would also make the binary fail to start where the library is absent. The X11 sink therefore **`dlopen`s `libXtst.so.6` and resolves symbols at runtime**, reporting itself unavailable if that fails. `dlopen` is libc; nothing is added to the build.
 - **Output injection must never block the frame loop.** Spec defect 7. Any sink that can block sits behind a queue on its own thread, and a full queue drops rather than waits.
@@ -50,6 +51,97 @@ Every task's requirements implicitly include this section.
 - **Bindings are configuration, not code.** Rebinding a gesture must not require editing or recompiling the recognizer. The owner asked for this specifically.
 - **Do not modify `main.py`.** The Python version stays as it is.
 - **Out of phase 2 scope:** draw mode, the header strip, the network sink, Wayland/`libei` injection, mobile.
+
+---
+
+## Amendment, 2026-11-15: modules, and three changes for what comes after
+
+The owner's decision after phase 1 merged: the hand-detection module must
+stand alone and work on Linux, macOS and Windows, with a thin per-system
+layer above it. That restructure **has already landed** on this branch, ahead
+of Task 2. The plan below predates it and the file paths in each task must be
+read through this section.
+
+### The module layout tasks must target
+
+`hc_core` is gone. It was one target holding primitives, detection, tracking,
+features, metrics and frame sources, and this plan would have added gesture
+recognition and mapping to the same pile. It is now:
+
+| Target | Directory | Contents |
+|---|---|---|
+| `hc_base` | `base/` | geometry, image types, metrics, frame sources. No ONNX |
+| `hc_vision` | `vision/` | anchors, palm decode, ROI, warp, association, features, `IHandTracker`. No ONNX |
+| `hc_vision_ort` | `vision/` | the ONNX Runtime backend, the only ORT consumer |
+| **`hc_control`** | **`control/`** | **gesture recognition and mapping — Tasks 2, 3, 4, 5, 6 create this** |
+| `hc_platform` | `platform/` | per-system: frame source, overlay, and the Task 9/10 sinks |
+| `hc_cli` | `app/` | argument parsing, dependency-free |
+
+So: **Tasks 2–6 create `control/` and the `hc_control` target**, not files
+under `core/`. Tasks 7–10's sinks go in `platform/`. Direction is enforced by
+`hc_assert_does_not_link`, so `hc_control` reaching into `hc_platform` is a
+configure error, not a review comment.
+
+`hc_control` may link `hc_vision` and `hc_base` and nothing else of ours. It
+must **not** link `hc_vision_ort`: gesture recognition consumes
+`HandObservation`, which is a plain-data type, and has no business carrying an
+inference runtime.
+
+### Change 1 — the platform layer holds no logic
+
+A standing rule, because it is the failure this restructure exists to prevent:
+`hc_platform` translates, it does not decide. What a gesture means and which
+command it maps to lives in `hc_control`, so there is one copy of that
+decision rather than one per operating system. A sink that contains an `if`
+about *which* gesture it received is in the wrong layer.
+
+### Change 2 — Task 5 must serialize, not only parse
+
+As written, Task 5 produces `ParseBindings` and stops. The eventual Commands &
+Bindings UI exists to *edit* bindings and save them, so a writer is needed; if
+it is not written here, the UI reimplements the format and the two definitions
+drift. Add to Task 5:
+
+- `std::string SerializeBindings(const BindingSet&);`
+- `TEST(Bindings, RoundTripsThroughSerialize)` — `Parse(Serialize(x)) == x` for
+  the shipped default and for a set exercising every `GestureKind`, `Phase`
+  and `Command`. A round-trip test is what makes the format a format rather
+  than a parser's accidental behaviour.
+
+### Change 3 — Task 11 must extract a `Controller`, not wire into `main()`
+
+Task 11 as written puts the frame loop in `main.cpp`. Nothing else can then
+reuse it: a GUI has its own event loop, a .NET host has its own process model,
+and both would reimplement the loop and immediately diverge from it.
+
+Task 11 therefore extracts a `Controller` in the app layer that owns the loop,
+the tracker, the recognizer, the mapper and the sink, and exposes roughly
+`Start` / `Stop` / `PollObservations` / `PollCommands`. `main.cpp` becomes a
+thin frontend over it, and the CLI stays one of several possible frontends
+rather than the only one.
+
+Constraints on it, each from a scenario discussed with the owner:
+
+- **One `Controller` instance per session; no singleton, no global state.** A
+  server embedding this runs many concurrent sessions, and per-hand ROI and
+  gesture latches are per-session state.
+- **Sessions must be able to share ONNX sessions.** Today each
+  `HandTrackerOnnx` owns its own `Ort::Env` and two `Ort::Session`
+  (`vision/src/hand_tracker_onnx.cpp`), so N users means N copies of both
+  models in memory. `Ort::Session::Run` is thread-safe; the per-session state
+  worth keeping separate is the small part. Do not hardcode the one-env-per-
+  tracker assumption any deeper.
+- **A `Controller` with no sink attached must be fully usable**, returning
+  `Command`s as data. That is the only sane mode for a server or a browser
+  client, where injecting input would move the *server's* cursor or is
+  forbidden outright. The plan already makes `Command` a plain-data boundary
+  with `OutputSink` behind it, so this needs no redesign — only that the
+  no-sink path is a supported configuration and is tested.
+
+A C ABI shim (`extern "C"`) over `Controller` is what would unlock .NET
+P/Invoke, Flutter FFI and mobile from one artifact. It is **not** in phase 2
+scope and should not be written before Task 11 lands, since until then there
+is nothing stable to wrap.
 
 ---
 
@@ -71,7 +163,7 @@ Conditions a reasonable user will hit, each pinned to the task that owns it.
 
 Pure geometry over one `HandObservation`. Separated from the recognizer so the arithmetic is tested without any state machine.
 
-**Files:** Create `cpp/core/include/hc/hand_features.hpp`, `cpp/core/src/hand_features.cpp`. Test `cpp/tests/test_hand_features.cpp`.
+**Files:** Create `cpp/vision/include/hc/hand_features.hpp`, `cpp/vision/src/hand_features.cpp`. Test `cpp/tests/test_hand_features.cpp`.
 
 **Interfaces:**
 - Consumes: `HandObservation`.
@@ -106,7 +198,7 @@ TEST(HandFeatures, PalmSizeIsNonZeroForADegenerateHand) {
 
 ## Task 2: The gesture vocabulary
 
-**Files:** Create `cpp/core/include/hc/gesture_event.hpp`. Test: folded into Task 3.
+**Files:** Create `cpp/control/include/hc/gesture_event.hpp`. Test: folded into Task 3.
 
 **Interfaces:**
 - Produces: `enum class GestureKind { None, Pinch, Fist, OpenPalm, PointIndex, TwoFingerScroll, ThumbUp, ... };` and
@@ -122,7 +214,7 @@ No step list; this is a header of plain types, landed with Task 3.
 
 The heart of phase 2, and where three of the seven Python defects live.
 
-**Files:** Create `cpp/core/include/hc/gesture_recognizer.hpp`, `cpp/core/src/gesture_recognizer.cpp`, plus Task 2's header. Test `cpp/tests/test_gesture_recognizer.cpp`.
+**Files:** Create `cpp/control/include/hc/gesture_recognizer.hpp`, `cpp/control/src/gesture_recognizer.cpp`, plus Task 2's header. Test `cpp/tests/test_gesture_recognizer.cpp`.
 
 **Interfaces:**
 - Consumes: `HandObservation`, `HandFeatures`.
@@ -180,7 +272,7 @@ TEST(GestureRecognizer, TimestampsArePassedThroughNotRead) {
 
 ## Task 4: Abstract commands
 
-**Files:** Create `cpp/core/include/hc/command.hpp`.
+**Files:** Create `cpp/control/include/hc/command.hpp`.
 
 **Interfaces:**
 - Produces: `struct Command { enum class Kind { MoveCursorRelative, Click, DoubleClick, Scroll, KeyPress, KeyRelease } kind; Point2 delta; int button; int key; };`
@@ -195,7 +287,7 @@ Landed with Task 6.
 
 The layer the owner specifically asked to be customizable.
 
-**Files:** Create `cpp/core/include/hc/bindings.hpp`, `cpp/core/src/bindings.cpp`. Test `cpp/tests/test_bindings.cpp`. Create `cpp/config/default_bindings.txt`.
+**Files:** Create `cpp/control/include/hc/bindings.hpp`, `cpp/control/src/bindings.cpp`. Test `cpp/tests/test_bindings.cpp`. Create `cpp/config/default_bindings.txt`.
 
 **Interfaces:**
 - Produces: `struct Binding { Handedness hand; GestureKind gesture; GestureEvent::Phase phase; Command command; };`, `struct BindingSet { std::vector<Binding> bindings; float sensitivity; float smoothing; };`, and `bool ParseBindings(const std::string& text, BindingSet& out, std::string& error);`
@@ -225,7 +317,7 @@ TEST(Bindings, RejectsOutOfRangeSmoothing) { /* must be 0..1 */ }
 
 ## Task 6: `ActionMapper`
 
-**Files:** Create `cpp/core/include/hc/action_mapper.hpp`, `cpp/core/src/action_mapper.cpp`, plus Task 4's header. Test `cpp/tests/test_action_mapper.cpp`.
+**Files:** Create `cpp/control/include/hc/action_mapper.hpp`, `cpp/control/src/action_mapper.cpp`, plus Task 4's header. Test `cpp/tests/test_action_mapper.cpp`.
 
 **Interfaces:**
 - Consumes: `GestureEvent`, `BindingSet`.
@@ -261,7 +353,7 @@ TEST(ActionMapper, EmitsNoPixelsAnywhere) {
 
 ## Task 7: `OutputSink` interface, null and logging sinks
 
-**Files:** Create `cpp/core/include/hc/output_sink.hpp` (interface only — it names no platform type, so it is core), `cpp/app/src/null_sink.{hpp,cpp}`, `cpp/app/src/logging_sink.{hpp,cpp}`. Test `cpp/tests/test_output_sink.cpp`.
+**Files:** Create `cpp/control/include/hc/output_sink.hpp` (interface only — it names no platform type, so it is core), `cpp/platform/src/null_sink.{hpp,cpp}`, `cpp/platform/src/logging_sink.{hpp,cpp}`. Test `cpp/tests/test_output_sink.cpp`.
 
 **Interfaces:**
 - Produces: `class IOutputSink { public: virtual ~IOutputSink() = default; virtual void Send(const Command&) = 0; virtual void ReleaseAll() = 0; virtual bool Available() const = 0; };`

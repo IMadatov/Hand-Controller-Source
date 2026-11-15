@@ -10,27 +10,75 @@ it does **not** inject input events or draw. See
 
 ## Layout
 
-| Path | What it is |
-|---|---|
-| `core/` | `hc_core` — the pipeline. Normalized coordinates only, **no OpenCV** |
-| `app/` | The OpenCV layer: frame sources, overlay, CLI, `main` |
-| `tests/` | GoogleTest suites, one binary per unit |
-| `tools/` | `validate_models`, which produced `docs/models.md` |
-| `docs/models.md` | The model record from Task 1 — observed values, not guesses |
+| Path | Target | What it is |
+|---|---|---|
+| `base/` | `hc_base` | Primitives: geometry, image types, metrics, frame sources. **No ONNX**, no OS |
+| `vision/` | `hc_vision` | The hand-detection module: anchors, palm decode, ROI, warp, association, features, `IHandTracker`. **No ONNX** |
+| | `hc_vision_ort` | The ONNX Runtime backend — the only ORT consumer in the project |
+| `platform/` | `hc_platform` | The per-system layer. Frames in, pixels out. The **only** target allowed OpenCV |
+| `app/` | `hc_cli` | Argument parsing. Links nothing but the standard library |
+| | `hand_controller` | `main()`, which wires every layer together |
+| `tests/` | | GoogleTest suites, one binary per unit |
+| `tools/` | `validate_models` | Produced `docs/models.md` |
 
-The core/app split is enforced, not just documented: `hc_assert_no_forbidden_deps`
-fails the build if anything drags OpenCV into `hc_core`. The core speaks
-normalized `0.0..1.0` coordinates everywhere, and `DrawObservations` in
-`app/src/overlay.cpp` is the only place in the project that multiplies them by
-pixel dimensions.
+`control/` (`hc_control`: gesture recognition and mapping) arrives with the
+phase 2 gesture tasks.
+
+### Why it is split this way
+
+The dependency order is one-directional:
+
+```
+hc_base  <-  hc_vision  <-  hc_vision_ort
+    ^            ^                ^
+    |            |                |
+    +--------- hc_platform -------+---- hand_controller ---- hc_cli
+```
+
+`hc_vision` is the standalone hand-detection module. It does not know what a
+gesture is, where frames come from, or how anything is drawn — it turns pixels
+into normalized landmarks and stops. Keeping it free of ONNX Runtime is what
+makes a second backend (ORT Web for WebAssembly, NNAPI, Core ML) a sibling
+target implementing the same `IHandTracker` rather than an edit to the
+algorithms.
+
+`hc_platform` is where systems differ, and it holds **no logic**. What a
+gesture means and which command it maps to stays in portable code below, so
+there is one copy of that decision rather than one per operating system.
+Someone asking "where does Linux differ from Windows" should find the entire
+answer inside `platform/`.
+
+### The layering is enforced, not documented
+
+`cmake/HcAssertNoForbiddenDeps.cmake` provides two assertions:
+
+- `hc_assert_no_forbidden_deps(<target>)` — the target links no OpenCV, X11 or
+  Xtst, transitively. Applied to every target below `hc_platform`.
+- `hc_assert_does_not_link(<target> FORBIDDEN <names...>)` — the direction
+  check, which stops a lower layer reaching up into a higher one.
+
+Both only *register*; `hc_run_layer_checks()` at the bottom of
+`CMakeLists.txt` runs them once the link graph is final. That ordering is the
+whole point — a check that runs where it is written sees only the link
+libraries added above it, and a violation appended below it configures
+cleanly. The first version of this file had exactly that hole.
+
+Every test links the **narrowest** target that satisfies it rather than a
+convenient superset, so a unit that quietly grows a dependency on a higher
+layer stops linking in `tests/CMakeLists.txt` instead of passing review.
+
+The core speaks normalized `0.0..1.0` coordinates everywhere, and
+`DrawObservations` in `platform/src/overlay.cpp` is the only place in the
+project that multiplies them by pixel dimensions.
 
 ## Building
 
 Both configurations fetch ONNX Runtime and the two ONNX models at configure
 time (hash-pinned).
 
-**Core and tests only — the fast path.** No OpenCV is fetched or built. This is
-what to use when working on anything under `core/`:
+**Portable layers and tests only — the fast path.** No OpenCV is fetched or
+built. This is what to use when working on anything under `base/`, `vision/`
+or `app/src/cli.cpp`, and it covers 127 of the 145 tests:
 
 ```bash
 cmake -S cpp -B cpp/build -G Ninja -DHC_BUILD_APP=OFF
@@ -97,15 +145,21 @@ second hand costs **+95%** per frame — it shares no work with the first.
 
 ## Platform support
 
-Linux is the only **verified** platform; everything above was built and run
-there.
+A platform counts as supported here only once the build has actually been
+configured, compiled and run on it. By that standard:
 
-The CMake for Windows exists (`cmake/FetchOnnxRuntime.cmake` selects the
-`win-x64` ONNX Runtime archive, hash-pinned) and is believed correct, but
-**has never been configured, compiled, or run** — no Windows machine was
-available. Treat it as untested, not as supported. There is no
-platform-specific application code to port: phase 1 contains no input
-injection, which is where the real platform divergence will arrive in phase 2.
+| Platform | Status |
+|---|---|
+| Linux x64 | **Verified.** Everything above was built and run here |
+| Windows x64 | **Untested.** The CMake exists and is believed correct — `cmake/FetchOnnxRuntime.cmake` selects the hash-pinned `win-x64` ONNX Runtime archive — but it has never been configured, compiled or run. No Windows machine was available |
+| macOS | **Absent.** `FetchOnnxRuntime.cmake` has no `osx` branch at all. Adding one is an archive URL, a SHA256 and an `elseif`; it is cheap but it has not been done |
+| Android / iOS | **Not attempted.** C++17 was chosen for NDK compatibility and ONNX Runtime ships for both, so `hc_base`, `hc_vision` and `hc_vision_ort` should port. Frame acquisition (CameraX, AVFoundation) and rendering have no OpenCV path and would be new `hc_platform` implementations |
+
+The portable layers carry no platform-specific code to port — that is the
+point of the split. Divergence is concentrated in `platform/`, and grows when
+the phase 2 injection tasks land: X11/XTest on Linux, `SendInput` on Windows,
+`CGEvent` on macOS. Note that input injection does not exist on iOS at all,
+and on Android only through a user-granted `AccessibilityService`.
 
 ## Notes for this machine
 
