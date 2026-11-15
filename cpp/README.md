@@ -1,12 +1,21 @@
 # hand_controller (C++)
 
-The phase 1 C++ rebuild of the hand-tracking pipeline: MediaPipe's palm-detect
-plus hand-landmark models on ONNX Runtime, two-hand tracking, a debug overlay,
-and per-stage timing instrumentation.
+The C++ rebuild of the hand-tracking pipeline: MediaPipe's palm-detect plus
+hand-landmark models on ONNX Runtime, two-hand tracking with fully independent
+per-hand state, configurable gesture-to-command bindings, a debug overlay, and
+per-stage timing instrumentation.
 
-Phase 1 ends at measurement. It tracks hands and reports where the time goes;
-it does **not** inject input events or draw. See
-`docs/superpowers/specs/2026-11-12-hand-controller-cpp-design.md`.
+Phase 1 ended at measurement. **Phase 2 added the layers above the tracker** —
+gesture recognition, action mapping and output sinks — so it now decides what a
+pose means and what command it should produce. What it does NOT yet do is
+actually inject that command on this machine: the session is Wayland and XTest
+is silently dead there, which is explained under "Gestures, bindings and input
+injection" below and is not a detail to skip.
+
+Still out of scope: draw mode, the header strip, a network sink, mobile.
+
+Design: `docs/superpowers/specs/2026-11-12-hand-controller-cpp-design.md`.
+Phase 2 outcome: `docs/superpowers/reports/2026-11-15-phase2-notes.md`.
 
 ## Layout
 
@@ -15,14 +24,15 @@ it does **not** inject input events or draw. See
 | `base/` | `hc_base` | Primitives: geometry, image types, metrics, frame sources. **No ONNX**, no OS |
 | `vision/` | `hc_vision` | The hand-detection module: anchors, palm decode, ROI, warp, association, features, `IHandTracker`. **No ONNX** |
 | | `hc_vision_ort` | The ONNX Runtime backend — the only ORT consumer in the project |
-| `platform/` | `hc_platform` | The per-system layer. Frames in, pixels out. The **only** target allowed OpenCV |
+| `control/` | `hc_control` | The logic layer: gesture recognition, bindings, action mapping, output sinks. Pure — no OS, no OpenCV, no inference runtime |
+| `platform/` | `hc_platform` | The per-system layer. Frames in, pixels out, events out. The **only** target allowed OpenCV |
 | `app/` | `hc_cli` | Argument parsing. Links nothing but the standard library |
 | | `hand_controller` | `main()`, which wires every layer together |
 | `tests/` | | GoogleTest suites, one binary per unit |
 | `tools/` | `validate_models` | Produced `docs/models.md` |
-
-`control/` (`hc_control`: gesture recognition and mapping) arrives with the
-phase 2 gesture tasks.
+| | `xtest_probe` | Proves whether XTest actually moves the pointer |
+| | `dump_contract` | Emits the whole UI contract as JSON, generated from `hc_control` |
+| | `bench_control` | Per-frame cost of recognition, mapping and dispatch |
 
 ### Why it is split this way
 
@@ -32,8 +42,16 @@ The dependency order is one-directional:
 hc_base  <-  hc_vision  <-  hc_vision_ort
     ^            ^                ^
     |            |                |
+    |        hc_control           |
+    |            ^                |
     +--------- hc_platform -------+---- hand_controller ---- hc_cli
 ```
+
+`hc_control` links `hc_vision` for `HandObservation` and **not**
+`hc_vision_ort`: gesture recognition consumes plain data and has no business
+carrying an inference runtime. That is asserted at configure time, not
+reviewed, and it is the precondition for a WebAssembly build that delegates
+inference to JavaScript while keeping the gesture logic.
 
 `hc_vision` is the standalone hand-detection module. It does not know what a
 gesture is, where frames come from, or how anything is drawn — it turns pixels
@@ -78,7 +96,7 @@ time (hash-pinned).
 
 **Portable layers and tests only — the fast path.** No OpenCV is fetched or
 built. This is what to use when working on anything under `base/`, `vision/`
-or `app/src/cli.cpp`, and it covers 127 of the 145 tests:
+`control/` or `app/src/cli.cpp`, and it covers 263 of the 288 tests:
 
 ```bash
 cmake -S cpp -B cpp/build -G Ninja -DHC_BUILD_APP=OFF
@@ -119,7 +137,7 @@ that way and say so.
 | `--bindings PATH` | Gesture bindings file (default: the compiled-in one) |
 | `--sensitivity F` | Cursor speed multiplier, > 0; overrides the file |
 | `--smoothing F` | Cursor smoothing, 0..1; overrides the file |
-| `--sink NAME` | `null`, `log` or `xtest` (default: **`null`**) |
+| `--sink NAME` | `null`, `log`, `xtest` or `sendinput` (default: **`null`**) |
 | `--no-inject` | Force the null sink, whatever `--sink` says |
 | `--headless` | No preview window |
 | `--report PATH` | Also write the timing report to PATH |
@@ -268,14 +286,15 @@ configured, compiled and run on it. By that standard:
 | Platform | Status |
 |---|---|
 | Linux x64 | **Verified.** Everything above was built and run here |
-| Windows x64 | **Untested.** The CMake exists and is believed correct — `cmake/FetchOnnxRuntime.cmake` selects the hash-pinned `win-x64` ONNX Runtime archive — but it has never been configured, compiled or run. No Windows machine was available |
+| Windows x64 | **Untested.** The CMake exists and is believed correct — `cmake/FetchOnnxRuntime.cmake` selects the hash-pinned `win-x64` ONNX Runtime archive — but it has never been configured, compiled or run. No Windows machine was available. The `SendInput` sink behind `--sink sendinput` is written and reachable, and has **never been compiled**: the whole file sits behind `#ifdef _WIN32`, so on Linux not even the compiler has read it. There is deliberately no test for it |
 | macOS | **Absent.** `FetchOnnxRuntime.cmake` has no `osx` branch at all. Adding one is an archive URL, a SHA256 and an `elseif`; it is cheap but it has not been done |
 | Android / iOS | **Not attempted.** C++17 was chosen for NDK compatibility and ONNX Runtime ships for both, so `hc_base`, `hc_vision` and `hc_vision_ort` should port. Frame acquisition (CameraX, AVFoundation) and rendering have no OpenCV path and would be new `hc_platform` implementations |
 
 The portable layers carry no platform-specific code to port — that is the
 point of the split. Divergence is concentrated in `platform/`, and grows when
-the phase 2 injection tasks land: X11/XTest on Linux, `SendInput` on Windows,
-`CGEvent` on macOS. Note that input injection does not exist on iOS at all,
+the phase 2 injection tasks land: `SendInput` on Windows (written, never run),
+X11/XTest on Linux (blocked — see the Wayland note above), `CGEvent` on
+macOS (not started). Note that input injection does not exist on iOS at all,
 and on Android only through a user-granted `AccessibilityService`.
 
 ## Notes for this machine

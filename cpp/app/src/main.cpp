@@ -22,6 +22,7 @@
 #include "cli.hpp"
 #include "opencv_frame_source.hpp"
 #include "overlay.hpp"
+#include "sendinput_sink.hpp"
 
 #include "hc/bindings.hpp"
 #include "hc/controller.hpp"
@@ -126,6 +127,19 @@ std::unique_ptr<hc::IOutputSink> MakeSink(const hc::CliOptions& opts) {
       return std::make_unique<hc::QueuedSink>(
           std::make_unique<hc::LoggingSink>(&std::cout), kSinkQueueCapacity);
 
+    case hc::SinkKind::SendInput:
+#ifdef _WIN32
+      // Written blind and never run by anyone -- see sendinput_sink.hpp. It is
+      // reachable rather than dead code, which is the most that can honestly
+      // be claimed for it from here.
+      if (auto sink = hc::SendInputSink::Create()) return sink;
+      std::cerr << "error: SendInput reports no desktop to inject into.\n";
+      return nullptr;
+#else
+      std::cerr << "error: --sink sendinput is Windows only.\n";
+      return nullptr;
+#endif
+
     case hc::SinkKind::XTest:
       // Task 9 is not written: the probe (cpp/tools/xtest_probe) shows XTest
       // on this machine returning success and moving nothing, because the
@@ -157,7 +171,9 @@ std::string SinkStatus(const hc::CliOptions& opts,
   const std::string name = hc::SinkKindName(kind);
 
   if (!controller.SinkAvailable()) return name + " (UNAVAILABLE)";
-  if (kind == hc::SinkKind::XTest) return name + ", injecting input";
+  if (kind == hc::SinkKind::XTest || kind == hc::SinkKind::SendInput) {
+    return name + ", injecting input";
+  }
   return name + ", no input injection";
 }
 

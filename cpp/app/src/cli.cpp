@@ -81,6 +81,7 @@ const char* SinkKindName(SinkKind sink) {
     case SinkKind::Null: return "null";
     case SinkKind::Log: return "log";
     case SinkKind::XTest: return "xtest";
+    case SinkKind::SendInput: return "sendinput";
   }
   return "null";
 }
@@ -129,12 +130,13 @@ std::string CliUsage() {
       "    --bindings PATH   gesture bindings file (default: compiled-in)\n"
       "    --sensitivity F   cursor speed multiplier, > 0 (overrides the file)\n"
       "    --smoothing F     cursor smoothing, 0..1 (overrides the file)\n"
-      "    --sink NAME       null | log | xtest (default: null)\n"
+      "    --sink NAME       null | log | xtest | sendinput (default: null)\n"
       "    --no-inject       force the null sink, whatever --sink says\n"
       "\n"
       "  The default sink is null: nothing is injected unless you ask. On a\n"
       "  Wayland session XTest reports success and moves nothing, so --sink\n"
-      "  xtest is only meaningful under X11.\n"
+      "  xtest is only meaningful under X11. --sink sendinput is Windows\n"
+      "  only, and has never been run by anyone.\n"
       "\n"
       "  Output:\n"
       "    --headless        no preview window\n"
@@ -227,8 +229,11 @@ bool ParseCli(int argc, char** argv, CliOptions& out, std::string& error) {
         opts.sink = SinkKind::Log;
       } else if (value == "xtest") {
         opts.sink = SinkKind::XTest;
+      } else if (value == "sendinput") {
+        opts.sink = SinkKind::SendInput;
       } else {
-        error = "--sink must be null, log or xtest, got \"" + value + "\"";
+        error = "--sink must be null, log, xtest or sendinput, got \"" +
+                value + "\"";
         return false;
       }
     } else if (flag == "--no-inject") {

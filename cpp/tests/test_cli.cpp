@@ -303,3 +303,26 @@ TEST(Cli, ReadTextFileReadsAFileItCanOpen) {
   EXPECT_TRUE(error.empty());
   EXPECT_NE(text.find("set sensitivity"), std::string::npos);
 }
+
+// sendinput is accepted by the parser on every platform, and refused by
+// main() on the ones it cannot run on. Parsing and availability are different
+// questions, and conflating them would make a command line that is valid on
+// Windows a syntax error elsewhere.
+TEST(Cli, ParsesTheWindowsSinkNameEverywhere) {
+  EXPECT_EQ(ParseOk({"--sink", "sendinput"}).sink, hc::SinkKind::SendInput);
+  EXPECT_STREQ(hc::SinkKindName(hc::SinkKind::SendInput), "sendinput");
+}
+
+TEST(Cli, NoInjectOverridesTheWindowsSinkToo) {
+  const CliOptions opts = ParseOk({"--sink", "sendinput", "--no-inject"});
+  EXPECT_EQ(hc::ResolveSink(opts), hc::SinkKind::Null);
+}
+
+// Every name the parser accepts must round-trip through SinkKindName, or the
+// startup line could report a sink the user never asked for.
+TEST(Cli, EverySinkNameRoundTrips) {
+  for (const char* name : {"null", "log", "xtest", "sendinput"}) {
+    const CliOptions opts = ParseOk({"--sink", name});
+    EXPECT_STREQ(hc::SinkKindName(opts.sink), name);
+  }
+}

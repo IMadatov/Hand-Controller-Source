@@ -13,12 +13,14 @@ enum class SourceKind { Camera, Video, Synthetic };
 // into an IOutputSink.
 //
 // `Null` discards, which is the default -- see CliOptions::no_inject.
-// `Log` prints what would have happened without doing it. `XTest` is the real
-// X11 injector.
-enum class SinkKind { Null, Log, XTest };
+// `Log` prints what would have happened without doing it. `XTest` and
+// `SendInput` are the real injectors, one per platform; naming both here
+// rather than one abstract "native" keeps an error message able to say which
+// backend was asked for and why it is unavailable.
+enum class SinkKind { Null, Log, XTest, SendInput };
 
-// "null", "log", "xtest". For the startup line, so what the program says it
-// is doing comes from the same table the parser read.
+// "null", "log", "xtest", "sendinput". For the startup line, so what the
+// program says it is doing comes from the same table the parser read.
 const char* SinkKindName(SinkKind sink);
 
 // The parsed command line. Every field carries the default that applies when
@@ -55,7 +57,7 @@ struct CliOptions {
   // somewhere and silently run unbound if it is missing".
   std::string bindings_path;
 
-  // --sink <null|log|xtest>. What was ASKED FOR, which is not necessarily
+  // --sink <null|log|xtest|sendinput>. What was ASKED FOR, which is not necessarily
   // what runs: see no_inject and ResolveSink.
   SinkKind sink = SinkKind::Null;
 

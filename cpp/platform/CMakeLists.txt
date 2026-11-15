@@ -14,6 +14,11 @@
 add_library(hc_platform STATIC
   src/opencv_frame_source.cpp
   src/overlay.cpp
+  # Windows only, and empty on every other platform: the whole file sits
+  # behind #ifdef _WIN32, so here it compiles to nothing at all. Listed
+  # anyway, because a source file excluded by CMake is a file nobody
+  # remembers exists.
+  src/sendinput_sink.cpp
 )
 
 # PUBLIC: targets linking hc_platform include its headers by plain name
@@ -28,7 +33,10 @@ target_include_directories(hc_platform PUBLIC
 #
 # hc::opencv is PUBLIC because cv::VideoCapture and cv::Mat appear as members
 # in OpenCvFrameSource's and Overlay's headers.
-target_link_libraries(hc_platform PUBLIC hc_vision hc::opencv)
+# hc_control for IOutputSink and Command, which the Windows sink implements.
+# The direction is the permitted one: platform sits ABOVE control and may
+# depend on it, never the reverse -- hc_control asserts that itself.
+target_link_libraries(hc_platform PUBLIC hc_vision hc_control hc::opencv)
 
 # No hc_assert_no_forbidden_deps here: OpenCV is this layer's whole point.
 # The direction check still applies -- the platform layer is the top of the
