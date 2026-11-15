@@ -20,6 +20,10 @@ target_compile_definitions(validate_models PRIVATE
 if(UNIX AND NOT APPLE)
   add_executable(xtest_probe xtest_probe.cpp)
   target_link_libraries(xtest_probe PRIVATE ${CMAKE_DL_LIBS})
+
+  # uinput_probe — the same question asked of /dev/uinput, which is the route
+  # that works under Wayland. Links nothing: open, ioctl and write are libc.
+  add_executable(uinput_probe uinput_probe.cpp)
 endif()
 
 # dump_contract — emits the vocabulary, the shipped configuration, the
