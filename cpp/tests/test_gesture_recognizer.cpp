@@ -309,6 +309,137 @@ TEST(GestureConfigTest, EveryEnterThresholdIsStricterThanItsExit) {
   }
 }
 
+TEST(GestureConfigTest, DefaultConfirmsATakeoverOverMoreThanOneFrame) {
+  const GestureConfig c = GestureConfig::Default();
+  EXPECT_GE(c.steal_confirm_frames, 1)
+      << "a value below 1 means an instant takeover, which is the chatter the "
+         "hysteresis exists to prevent";
+}
+
+// --- takeover between gestures one finger apart --------------------------
+//
+// Five pairs in the vocabulary differ by a single finger, so the exit
+// threshold that tolerates one finger of flicker (4/5 = 0.8, above the 0.7
+// exit) also makes the transition between them impossible without a takeover.
+// point_index -> two_fingers is the default configuration's primary
+// interaction -- point to move the cursor, raise the middle finger to click --
+// so it is the pair these tests use.
+
+TEST(GestureRecognizer, ABetterScoringGestureTakesOverAfterConfirmation) {
+  const GestureConfig c = GestureConfig::Default();
+  GestureRecognizer r(c);
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+
+  const auto feed = [&](const HandObservation& pose, int frames) {
+    for (int i = 0; i < frames; ++i) {
+      r.Process({pose}, 0, out);
+      all.insert(all.end(), out.begin(), out.end());
+    }
+  };
+
+  // Long enough after the confirmation count that the new gesture has room to
+  // begin and be held, rather than landing on the last frame.
+  feed(PointIndex(), 4);
+  feed(TwoFingers(), c.steal_confirm_frames + 4);
+
+  ASSERT_GE(all.size(), 3u);
+  EXPECT_EQ(all.front().kind, GestureKind::PointIndex);
+  EXPECT_EQ(all.front().phase, Phase::Began);
+
+  // The old gesture ended exactly once and the new one began exactly once.
+  int point_ended = 0;
+  int two_began = 0;
+  for (const auto& e : all) {
+    if (e.kind == GestureKind::PointIndex && e.phase == Phase::Ended) {
+      ++point_ended;
+    }
+    if (e.kind == GestureKind::TwoFingers && e.phase == Phase::Began) {
+      ++two_began;
+    }
+  }
+  EXPECT_EQ(point_ended, 1);
+  EXPECT_EQ(two_began, 1);
+
+  // And the stream finishes on the new gesture, still held.
+  EXPECT_EQ(all.back().kind, GestureKind::TwoFingers);
+  EXPECT_EQ(all.back().phase, Phase::Held);
+}
+
+// A takeover ends one gesture and begins another, and a one-shot binding
+// fires on that begin. If a single bad frame of landmarks were enough, a
+// finger wobbling between two bound poses would produce a click per wobble.
+TEST(GestureRecognizer, ASingleWobbleFrameDoesNotTakeOver) {
+  const GestureConfig c = GestureConfig::Default();
+  ASSERT_GT(c.steal_confirm_frames, 1)
+      << "this test is meaningless if one frame is enough";
+
+  GestureRecognizer r(c);
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+
+  // Alternating, so the challenger never wins twice in a row.
+  for (int i = 0; i < 40; ++i) {
+    r.Process({i % 2 == 0 ? PointIndex() : TwoFingers()}, i, out);
+    all.insert(all.end(), out.begin(), out.end());
+  }
+
+  EXPECT_EQ(CountPhase(all, Phase::Began), 1);
+  EXPECT_EQ(CountPhase(all, Phase::Ended), 0);
+  for (const auto& e : all) EXPECT_EQ(e.kind, GestureKind::PointIndex);
+}
+
+// The release of one gesture and the press of an unrelated one must not arrive
+// from the same frame: a binding that maps them to key_press and key_release
+// would otherwise see them out of order within one dispatch.
+TEST(GestureRecognizer, TakeoverEndsAndBeginsOnSeparateFrames) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+
+  for (int i = 0; i < 4; ++i) r.Process({PointIndex()}, i, out);
+
+  bool saw_ended = false;
+  bool saw_began = false;
+  for (int i = 0; i < 10; ++i) {
+    r.Process({TwoFingers()}, i, out);
+    const int ended = CountPhase(out, Phase::Ended);
+    const int began = CountPhase(out, Phase::Began);
+    EXPECT_FALSE(ended > 0 && began > 0)
+        << "frame " << i << " carried both a release and a press";
+    if (ended > 0) {
+      saw_ended = true;
+      EXPECT_FALSE(saw_began) << "the new gesture began before the old ended";
+    }
+    if (began > 0) saw_began = true;
+  }
+  EXPECT_TRUE(saw_ended);
+  EXPECT_TRUE(saw_began);
+}
+
+// The count is configuration, not a constant hidden in the state machine.
+TEST(GestureRecognizer, TakeoverHonoursTheConfiguredConfirmationCount) {
+  GestureConfig c = GestureConfig::Default();
+  c.steal_confirm_frames = 5;
+  GestureRecognizer r(c);
+  std::vector<GestureEvent> out;
+
+  for (int i = 0; i < 4; ++i) r.Process({PointIndex()}, i, out);
+
+  // Four winning frames are not enough: still held, nothing released.
+  for (int i = 0; i < 4; ++i) {
+    r.Process({TwoFingers()}, i, out);
+    ASSERT_EQ(out.size(), 1u) << "frame " << i;
+    EXPECT_EQ(out[0].kind, GestureKind::PointIndex);
+    EXPECT_EQ(out[0].phase, Phase::Held) << "frame " << i;
+  }
+
+  // The fifth is.
+  r.Process({TwoFingers()}, 4, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].kind, GestureKind::PointIndex);
+  EXPECT_EQ(out[0].phase, Phase::Ended);
+}
+
 // --- the plan's nine behaviours ------------------------------------------
 
 // Spec defect 5: the Python latch reset every frame, so a held pinch fired a

@@ -84,6 +84,11 @@ GestureConfig GestureConfig::Default() {
   c.thresholds[Index(GestureKind::PinkyOnly)] = pattern;
   c.thresholds[Index(GestureKind::FourFingers)] = pattern;
 
+  // Two frames is roughly 20 ms at the measured frame rate: below human
+  // perception, and enough to reject a single bad frame of landmarks. See the
+  // field's comment for why a takeover exists at all.
+  c.steal_confirm_frames = 2;
+
   return c;
 }
 
@@ -147,6 +152,13 @@ GestureRecognizer::GestureRecognizer(const GestureConfig& config)
            "GestureConfig: enter threshold must be strictly above exit");
   }
   assert(config_.pinch_span > 0.0f && "GestureConfig: pinch_span must be > 0");
+  assert(config_.steal_confirm_frames >= 1 &&
+         "GestureConfig: steal_confirm_frames must be at least 1");
+
+  // Floored rather than trusted, because the asserts above vanish under
+  // NDEBUG and a count of zero there would mean an INSTANT takeover -- the one
+  // behaviour the confirmation window exists to prevent.
+  config_.steal_confirm_frames = std::max(1, config_.steal_confirm_frames);
 
   for (TrackState& t : tracks_) t.in_use = false;
 }
@@ -171,6 +183,8 @@ GestureRecognizer::TrackState* GestureRecognizer::FindOrCreate(
     t.latched_handedness = Handedness::Unknown;
     t.last_position = Point2{0.0f, 0.0f};
     t.has_position = false;
+    t.challenger = GestureKind::None;
+    t.challenger_frames = 0;
     t.seen_this_frame = false;
     return &t;
   }
@@ -230,6 +244,8 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
 
       state->active = best;
       state->latched_handedness = hand.handedness;
+      state->challenger = GestureKind::None;
+      state->challenger_frames = 0;
 
       ev.kind = best;
       ev.phase = GestureEvent::Phase::Began;
@@ -239,10 +255,10 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
       continue;
     }
 
-    // Something is held. It keeps running on ITS OWN exit threshold; another
-    // gesture scoring higher does not steal it. Without this an ambiguous
-    // pose would alternate between two kinds, emitting a Began and an Ended
-    // every frame.
+    // Something is held. It keeps running on ITS OWN exit threshold, and a
+    // single frame of another gesture scoring higher does not steal it --
+    // without that, an ambiguous pose would alternate between two kinds,
+    // emitting a Began and an Ended every frame.
     const std::size_t active_index = Index(state->active);
     const float score = GestureScore(state->active, f, config_);
 
@@ -250,12 +266,62 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
     ev.handedness = state->latched_handedness;  // Latched, never re-read.
     ev.delta = motion;
 
-    if (score >= config_.thresholds[active_index].exit) {
-      ev.phase = GestureEvent::Phase::Held;
-    } else {
+    if (score < config_.thresholds[active_index].exit) {
+      // The pose relaxed out of the gesture on its own terms. No takeover is
+      // involved, so the challenger is irrelevant and is dropped with it.
       ev.phase = GestureEvent::Phase::Ended;
       state->active = GestureKind::None;
+      state->challenger = GestureKind::None;
+      state->challenger_frames = 0;
+      out.push_back(ev);
+      continue;
     }
+
+    // The active gesture still clears its exit threshold, so the only way out
+    // of it this frame is a TAKEOVER: a different gesture clearing its own
+    // enter threshold AND scoring strictly higher, for steal_confirm_frames
+    // consecutive frames. Needed because five pairs in the vocabulary differ
+    // by exactly one finger, which the exit threshold deliberately tolerates
+    // -- so point_index would otherwise hold through a two_fingers pose
+    // forever, and the default configuration's click could never fire.
+    GestureKind challenger = GestureKind::None;
+    float challenger_score = score;
+    for (std::size_t i = 1; i < kGestureKindCount; ++i) {
+      if (static_cast<GestureKind>(i) == state->active) continue;
+      const GestureKind kind = static_cast<GestureKind>(i);
+      const float other = GestureScore(kind, f, config_);
+      if (other >= config_.thresholds[i].enter && other > challenger_score) {
+        challenger = kind;
+        challenger_score = other;
+      }
+    }
+
+    if (challenger == GestureKind::None) {
+      // Nothing is contesting it, so a part-won takeover is abandoned rather
+      // than resumed later: the frames must be CONSECUTIVE.
+      state->challenger_frames = 0;
+    } else if (challenger == state->challenger) {
+      ++state->challenger_frames;
+    } else {
+      state->challenger_frames = 1;
+    }
+    state->challenger = challenger;
+
+    if (challenger != GestureKind::None &&
+        state->challenger_frames >= config_.steal_confirm_frames) {
+      // Confirmed. The old gesture ENDS on this frame and the new one begins
+      // on a later one, through the same enter-threshold path as any other
+      // gesture -- so a release and an unrelated press never arrive from the
+      // same frame, and the one-shot Began still fires exactly once.
+      ev.phase = GestureEvent::Phase::Ended;
+      state->active = GestureKind::None;
+      state->challenger = GestureKind::None;
+      state->challenger_frames = 0;
+      out.push_back(ev);
+      continue;
+    }
+
+    ev.phase = GestureEvent::Phase::Held;
     out.push_back(ev);
   }
 

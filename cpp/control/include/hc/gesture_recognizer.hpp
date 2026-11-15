@@ -38,6 +38,26 @@ struct GestureConfig {
   // can only move in fifths.
   float pinch_span;
 
+  // How many CONSECUTIVE frames a better-scoring gesture must win before it
+  // takes over from the active one. At least 1.
+  //
+  // Why a takeover exists at all: pattern scores move in fifths, and the exit
+  // threshold tolerates one finger of disagreement so a flicker does not end
+  // a gesture. But five pairs in the vocabulary differ by exactly one finger
+  // -- fist/point_index, fist/thumb_up, fist/pinky_only,
+  // open_palm/four_fingers and point_index/two_fingers -- so that same
+  // tolerance makes the transition between them IMPOSSIBLE without it. The
+  // last pair is the default configuration's primary interaction: point to
+  // move the cursor, raise the middle finger to click.
+  //
+  // Why it is confirmed over several frames rather than instantly: a takeover
+  // ends one gesture and begins another, and a one-shot binding fires on that
+  // begin. A middle finger wobbling between two bound poses would otherwise
+  // produce a click per wobble, which is the chatter the hysteresis exists to
+  // prevent. Two frames is roughly 20 ms at the measured frame rate -- below
+  // human perception, and enough to reject a single bad frame of landmarks.
+  int steal_confirm_frames;
+
   // The defaults the application uses. Chosen, not measured -- there is no
   // camera on the build machine, so these are starting points for the
   // owner to tune against a real hand, not findings.
@@ -75,9 +95,13 @@ inline constexpr std::size_t kMaxGestureTracks = 32;
 // Python version:
 //
 //   1. ONE gesture is active per track at a time, and it stays active until
-//      its own score falls below its own exit threshold. A different gesture
-//      scoring higher does not steal an active one. Without this, a fist and
-//      a pinch both matching would emit two interleaved streams.
+//      its own score falls below its own exit threshold, or until a different
+//      gesture clearing its own enter threshold and scoring strictly higher
+//      has done so for `steal_confirm_frames` consecutive frames. Without the
+//      first half, a fist and a pinch both matching would emit two interleaved
+//      streams; without the second, the five one-finger-apart pairs could
+//      never transition at all. A takeover emits `Ended` for the old gesture
+//      and the new one begins on a LATER frame, never the same one.
 //
 //   2. State lives per `track_id` and nowhere else. A track that disappears
 //      invalidates only its own state (spec defect 4: shared globals kept
@@ -134,6 +158,13 @@ class GestureRecognizer {
     // a newly seen hand would report a delta measured from the origin.
     Point2 last_position;
     bool has_position;
+
+    // The gesture currently contesting `active`, and for how many CONSECUTIVE
+    // frames it has out-scored it. `challenger_frames` resets to zero the
+    // moment no gesture contests, so a part-won takeover is abandoned rather
+    // than resumed later. Both are meaningless while `active` is None.
+    GestureKind challenger;
+    int challenger_frames;
 
     bool seen_this_frame;
   };
