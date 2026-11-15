@@ -1,5 +1,8 @@
-/// What the tracker saw. Mirrors `hc::HandObservation` plus the few derived
-/// values the UI displays beside it.
+/// What the tracker saw, and the shape of the model that saw it.
+///
+/// [HandObservation] mirrors `hc::HandObservation` field for field. The rest
+/// is what the UI needs alongside it: the landmark ordering, whether the
+/// sink can deliver, and the per-frame cost.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -9,6 +12,34 @@ import 'gesture.dart';
 /// The number of landmarks the hand model emits. Fixed by the model, not a
 /// preference.
 const int kLandmarkCount = 21;
+
+/// Landmark indices, as the hand model orders them. Named because
+/// `landmarks[8]` in a painter is unreadable.
+abstract final class Lm {
+  static const wrist = 0;
+
+  /// Each finger is four consecutive points, base to tip.
+  static const thumb = 1;
+  static const index = 5;
+  static const middle = 9;
+  static const ring = 13;
+  static const pinky = 17;
+
+  /// Finger bases, in order, for drawing the palm outline.
+  static const palmOutline = [wrist, index, middle, ring, pinky];
+
+  /// The bone pairs to draw. Five chains plus the palm web.
+  static List<(int, int)> get connections => [
+        for (final base in [thumb, index, middle, ring, pinky])
+          for (var j = 0; j < 3; j++) (base + j, base + j + 1),
+        (wrist, thumb),
+        (wrist, index),
+        (wrist, pinky),
+        (index, middle),
+        (middle, ring),
+        (ring, pinky),
+      ];
+}
 
 /// A normalized point. `0..1` across the frame, origin top-left.
 ///

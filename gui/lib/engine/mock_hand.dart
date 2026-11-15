@@ -12,34 +12,6 @@ import 'dart:math' as math;
 import '../domain/gesture.dart';
 import '../domain/observation.dart';
 
-/// Landmark indices, as the hand model orders them. Named because
-/// `landmarks[8]` in a painter is unreadable.
-abstract final class Lm {
-  static const wrist = 0;
-
-  /// Each finger is four consecutive points, base to tip.
-  static const thumb = 1;
-  static const index = 5;
-  static const middle = 9;
-  static const ring = 13;
-  static const pinky = 17;
-
-  /// Finger bases, in order, for drawing the palm outline.
-  static const palmOutline = [wrist, index, middle, ring, pinky];
-
-  /// The bone pairs to draw. Five chains plus the palm web.
-  static List<(int, int)> get connections => [
-        for (final base in [thumb, index, middle, ring, pinky])
-          for (var j = 0; j < 3; j++) (base + j, base + j + 1),
-        (wrist, thumb),
-        (wrist, index),
-        (wrist, pinky),
-        (index, middle),
-        (middle, ring),
-        (ring, pinky),
-      ];
-}
-
 /// How extended each finger is, thumb first, `0` folded to `1` straight.
 typedef FingerCurl = ({
   double thumb,

@@ -17,10 +17,13 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hand_controller_gui/app.dart';
 import 'package:hand_controller_gui/engine/mock_engine.dart';
+import 'package:hand_controller_gui/screens/onboarding.dart';
+import 'package:hand_controller_gui/screens/tray_overlay.dart';
 
 /// The canvas every mockup was designed on.
 const _windowSize = Size(1280, 800);
@@ -62,6 +65,26 @@ File? _findIconFont() {
     dir = dir.parent;
   }
   return null;
+}
+
+/// Pumps enough frames for a route transition to finish.
+///
+/// `pumpAndSettle` is not usable here: the engine's frame timer never stops,
+/// so there is no quiet moment to settle into.
+Future<void> settle(WidgetTester tester) async {
+  for (var i = 0; i < 12; i++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
+/// Closes the top route from the root navigator.
+///
+/// `skipOffstage: false` because a full-screen route takes the one below it
+/// offstage, and the shell is exactly what we need a context from.
+Future<void> closeRoute(WidgetTester tester) async {
+  Navigator.of(tester.element(find.byType(AppShell, skipOffstage: false)))
+      .pop();
+  await settle(tester);
 }
 
 void main() {
@@ -117,6 +140,49 @@ void main() {
         matchesGoldenFile('goldens/${section.name}.png'),
       );
     }
+
+    // The two screens that are not in the sidebar: the first-run wizard and
+    // the compact overlay, both entered from Settings.
+    await tester.tap(find.text(AppSection.settings.label));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Both entry points live under the System category, not the Camera one
+    // Settings opens on.
+    await tester.tap(find.text('System'));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.tap(find.text('Show overlay'));
+    await settle(tester);
+    await expectLater(
+      find.byType(HandControllerApp),
+      matchesGoldenFile('goldens/tray_overlay.png'),
+    );
+    expect(find.byType(TrayOverlay), findsOneWidget);
+    await closeRoute(tester);
+
+    await tester.tap(find.text('Run setup'));
+    await settle(tester);
+    await expectLater(
+      find.byType(HandControllerApp),
+      matchesGoldenFile('goldens/onboarding.png'),
+    );
+
+    // Step 2, where the calibration measurement is actually running.
+    await tester.tap(find.text('Continue'));
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(milliseconds: 35));
+    }
+    await expectLater(
+      find.byType(HandControllerApp),
+      matchesGoldenFile('goldens/onboarding_calibrate.png'),
+    );
+
+    expect(find.byType(OnboardingScreen), findsOneWidget);
+    await closeRoute(tester);
+    await tester.tap(find.text(AppSection.diagnostics.label));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
 
     // Diagnostics again with injection requested and refused, which is the
     // state this screen exists for: XTest reports success and moves nothing,

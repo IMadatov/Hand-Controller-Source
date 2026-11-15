@@ -92,18 +92,24 @@ class _HandControllerAppState extends State<HandControllerApp> {
     super.dispose();
   }
 
+  /// The scopes sit ABOVE [MaterialApp], not inside its `home`.
+  ///
+  /// A pushed route and a dialog are mounted under the app's Navigator,
+  /// which is above `home` — so a scope provided inside `home` is invisible
+  /// to them. The onboarding wizard and the tray overlay are both routes,
+  /// and both need the engine.
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Hand Controller',
-        debugShowCheckedModeBanner: false,
-        theme: buildHcTheme(),
-        home: EngineScope(
-          engine: widget.engine,
-          child: BindingsScope(
-            controller: _bindings,
-            child: SettingsScope(
-              settings: _settings,
-              child: const AppShell(),
+  Widget build(BuildContext context) => EngineScope(
+        engine: widget.engine,
+        child: BindingsScope(
+          controller: _bindings,
+          child: SettingsScope(
+            settings: _settings,
+            child: MaterialApp(
+              title: 'Hand Controller',
+              debugShowCheckedModeBanner: false,
+              theme: buildHcTheme(),
+              home: const AppShell(),
             ),
           ),
         ),

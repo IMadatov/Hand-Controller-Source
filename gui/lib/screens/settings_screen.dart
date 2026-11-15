@@ -4,6 +4,8 @@ import '../app.dart';
 import '../domain/bindings.dart';
 import '../domain/observation.dart';
 import '../state/app_settings.dart';
+import 'onboarding.dart';
+import 'tray_overlay.dart';
 import '../state/bindings_controller.dart';
 import '../theme/tokens.dart';
 import '../widgets/common.dart';
@@ -239,6 +241,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ];
 
   List<Widget> _systemSection(AppSettings settings) => [
+        _Section(
+          title: 'Setup',
+          // Entered from here rather than shown automatically on first run:
+          // "is this the first run" needs a stored flag, and nothing is
+          // persisted yet. When there is a store, only the caller changes.
+          note: 'The first-run wizard. Safe to re-run at any time.',
+          children: [
+            _Field(
+              label: 'Guided setup',
+              help: 'Pick a camera, measure your hand range, and try the '
+                  'three poses the defaults use.',
+              child: HcButton(
+                label: 'Run setup',
+                icon: Icons.play_circle_outline,
+                onPressed: () =>
+                    Navigator.of(context).push(OnboardingScreen.route()),
+              ),
+            ),
+            _Field(
+              label: 'Compact overlay',
+              help: 'The small heads-up display meant to sit beside your '
+                  'work. It is shown here in a dialog; giving it its own '
+                  'always-on-top window is a platform change.',
+              child: HcButton(
+                label: 'Show overlay',
+                icon: Icons.picture_in_picture_alt_outlined,
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => const Dialog(
+                    backgroundColor: Colors.transparent,
+                    elevation: 0,
+                    child: TrayOverlay(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
         _Section(
           title: 'System',
           children: [

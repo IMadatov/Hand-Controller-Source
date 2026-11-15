@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../domain/gesture.dart';
 import '../domain/observation.dart';
-import '../engine/mock_hand.dart';
 import '../theme/tokens.dart';
 import 'common.dart';
 
