@@ -1,0 +1,69 @@
+# Hand Controller — default bindings
+#
+# Format:  <hand> <gesture> <phase> -> <command> [arg]
+#
+#   hand      any | left | right        ("any" also matches an unlabelled hand)
+#   gesture   pinch | fist | open_palm | point_index | two_fingers |
+#             thumb_up | pinky_only | four_fingers
+#   phase     began | held | ended
+#   command   move_cursor | scroll | click | double_click |
+#             key_press | key_release
+#
+# `click` and `double_click` take an optional button (left, right, middle) and
+# default to left. `key_press` and `key_release` require a key name.
+# `move_cursor` and `scroll` take no argument -- they act on the gesture's own
+# movement.
+#
+# Every key_press must have a matching key_release on the `ended` phase, or
+# the configuration is rejected. A key still held after the gesture stops is
+# worse than a gesture that never fires.
+
+set sensitivity 2.0
+set smoothing 0.5
+
+# --- Right hand: the pointer -------------------------------------------------
+
+# Point with the index finger to move the cursor. `held`, so it acts on every
+# frame the pose lasts, using that frame's movement.
+right point_index  held  -> move_cursor
+
+# Open hand to scroll.
+right open_palm    held  -> scroll
+
+# Index and middle up: a single left click. `began`, so it fires once no
+# matter how long the pose is held.
+right two_fingers  began -> click left
+
+# Thumb and index tips TOGETHER: double click.
+#
+# main.py used thumb-and-index-both-up for this, which differs from its
+# cursor pose only by the thumb -- and the thumb is the least reliable
+# landmark here, since hand_features.cpp's splay threshold is still
+# uncalibrated. A pinch is measured from the distance between two fingertips
+# instead, needs no thumb threshold at all, and cannot be confused with
+# pointing. The command is the same; the pose is deliberately better.
+right pinch        began -> double_click left
+
+# --- Left hand: arrow keys and the screenshot --------------------------------
+
+# Each arrow is a press on `began` and a release on `ended`, so the key is
+# HELD for as long as the pose is. main.py tapped these instead. Holding is
+# what the owner asked for -- an arrow key down with the left hand while the
+# right hand works the cursor -- and it is the acceptance criterion for
+# independent per-hand state.
+left thumb_up      began -> key_press   arrow_right
+left thumb_up      ended -> key_release arrow_right
+
+left point_index   began -> key_press   arrow_up
+left point_index   ended -> key_release arrow_up
+
+left pinky_only    began -> key_press   arrow_left
+left pinky_only    ended -> key_release arrow_left
+
+left four_fingers  began -> key_press   arrow_down
+left four_fingers  ended -> key_release arrow_down
+
+# Open left hand: print-screen. The screenshot happens on the press; the
+# release is required so the key does not stay down.
+left open_palm     began -> key_press   print_screen
+left open_palm     ended -> key_release print_screen

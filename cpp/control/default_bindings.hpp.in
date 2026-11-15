@@ -1,0 +1,20 @@
+// GENERATED FILE -- do not edit, and do not commit the generated copy.
+//
+// CMake expands this from config/default_bindings.txt at configure time so
+// that the shipped configuration and the compiled-in fallback are literally
+// the same bytes. Keeping a hand-written copy of the file in a string literal
+// would mean two definitions, and the first edit to either would silently
+// desynchronize them.
+#pragma once
+
+namespace hc {
+namespace internal {
+
+// The delimiter is short because C++ caps a raw-string delimiter at 16
+// characters, and it is distinctive because it must not occur in the
+// configuration text itself.
+inline constexpr const char* kDefaultBindingsText =
+    R"HCCFG(@HC_DEFAULT_BINDINGS_TEXT@)HCCFG";
+
+}  // namespace internal
+}  // namespace hc

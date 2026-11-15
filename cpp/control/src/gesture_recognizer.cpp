@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstring>
 
 namespace hc {
 namespace {
@@ -33,10 +34,14 @@ PatternRule RuleFor(GestureKind kind) {
       return {true, {true, true, true, true, true}};
     case GestureKind::PointIndex:
       return {true, {false, true, false, false, false}};
-    case GestureKind::TwoFingerScroll:
+    case GestureKind::TwoFingers:
       return {true, {false, true, true, false, false}};
     case GestureKind::ThumbUp:
       return {true, {true, false, false, false, false}};
+    case GestureKind::PinkyOnly:
+      return {true, {false, false, false, false, true}};
+    case GestureKind::FourFingers:
+      return {true, {false, true, true, true, true}};
     case GestureKind::Pinch:
     case GestureKind::None:
       break;
@@ -74,8 +79,10 @@ GestureConfig GestureConfig::Default() {
   c.thresholds[Index(GestureKind::Fist)] = pattern;
   c.thresholds[Index(GestureKind::OpenPalm)] = pattern;
   c.thresholds[Index(GestureKind::PointIndex)] = pattern;
-  c.thresholds[Index(GestureKind::TwoFingerScroll)] = pattern;
+  c.thresholds[Index(GestureKind::TwoFingers)] = pattern;
   c.thresholds[Index(GestureKind::ThumbUp)] = pattern;
+  c.thresholds[Index(GestureKind::PinkyOnly)] = pattern;
+  c.thresholds[Index(GestureKind::FourFingers)] = pattern;
 
   return c;
 }
@@ -87,10 +94,24 @@ const char* GestureKindName(GestureKind kind) {
     case GestureKind::Fist: return "fist";
     case GestureKind::OpenPalm: return "open_palm";
     case GestureKind::PointIndex: return "point_index";
-    case GestureKind::TwoFingerScroll: return "two_finger_scroll";
+    case GestureKind::TwoFingers: return "two_fingers";
     case GestureKind::ThumbUp: return "thumb_up";
+    case GestureKind::PinkyOnly: return "pinky_only";
+    case GestureKind::FourFingers: return "four_fingers";
   }
   return "none";
+}
+
+bool GestureKindFromName(const char* name, GestureKind& out) {
+  if (name == nullptr) return false;
+  for (std::size_t i = 0; i < kGestureKindCount; ++i) {
+    const GestureKind kind = static_cast<GestureKind>(i);
+    if (std::strcmp(name, GestureKindName(kind)) == 0) {
+      out = kind;
+      return true;
+    }
+  }
+  return false;
 }
 
 float GestureScore(GestureKind kind, const HandFeatures& f,

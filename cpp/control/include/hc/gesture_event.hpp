@@ -16,14 +16,20 @@ namespace hc {
 // so that "no gesture is active" is representable without a sentinel or an
 // optional, and it occupies index 0 so the threshold table below can be
 // indexed directly by the enum.
+// Each name describes the POSE, never the action it is expected to drive.
+// Bindings are configuration, so any of these can be bound to anything; a
+// kind called "TwoFingerScroll" would be a lie the moment a user bound it to
+// a click, which is in fact what the default configuration does.
 enum class GestureKind {
   None = 0,
-  Pinch,
-  Fist,
-  OpenPalm,
-  PointIndex,
-  TwoFingerScroll,
-  ThumbUp,
+  Pinch,        // Thumb and index TIPS together. Scored by distance.
+  Fist,         // No finger extended.
+  OpenPalm,     // All five extended.
+  PointIndex,   // Index only.
+  TwoFingers,   // Index and middle.
+  ThumbUp,      // Thumb only.
+  PinkyOnly,    // Pinky only.
+  FourFingers,  // All four fingers, thumb folded.
 };
 
 // The number of entries in GestureKind, `None` included. Used to size the
@@ -32,15 +38,23 @@ enum class GestureKind {
 // Keep this in step with the enum. A kind added above without bumping this
 // would index past the table, which is why GestureConfig asserts its own
 // table size rather than trusting the number.
-inline constexpr std::size_t kGestureKindCount = 7;
+inline constexpr std::size_t kGestureKindCount = 9;
 
-// Returns a stable, lowercase name for `kind`, suitable for configuration
-// files and log output: "pinch", "fist", "open_palm", "point_index",
-// "two_finger_scroll", "thumb_up", "none".
+// Returns a stable, lowercase name for `kind`: "pinch", "fist", "open_palm",
+// "point_index", "two_fingers", "thumb_up", "pinky_only", "four_fingers",
+// "none".
 //
 // These strings are a published interface -- the bindings file uses them --
 // so they must not be reworded once configurations exist in the wild.
 const char* GestureKindName(GestureKind kind);
+
+// Parses a name produced by GestureKindName. Returns false if `name` matches
+// none of them, leaving `out` untouched.
+//
+// "none" IS accepted here, because this function's job is to mirror
+// GestureKindName exactly. Rejecting it as a binding target is the bindings
+// parser's business, not this function's.
+bool GestureKindFromName(const char* name, GestureKind& out);
 
 // One gesture transition for one tracked hand on one frame.
 //

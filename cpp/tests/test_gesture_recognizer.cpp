@@ -143,10 +143,29 @@ HandObservation PointIndex(std::uint32_t track_id = 1,
 }
 
 // Index and middle: ring and pinky curled, thumb folded in.
-HandObservation TwoFingerScroll(std::uint32_t track_id = 1,
-                                Point2 origin = {0.5f, 0.8f}) {
+HandObservation TwoFingers(std::uint32_t track_id = 1,
+                           Point2 origin = {0.5f, 0.8f}) {
   HandObservation o = OpenPalm(track_id, origin);
   for (int f = 2; f < 4; ++f) Curl(o, f);
+  FoldThumb(o);
+  return o;
+}
+
+// Pinky only: index, middle and ring curled, thumb folded in. main.py bound
+// this to the left arrow key.
+HandObservation PinkyOnly(std::uint32_t track_id = 1,
+                          Point2 origin = {0.5f, 0.8f}) {
+  HandObservation o = OpenPalm(track_id, origin);
+  for (int f = 0; f < 3; ++f) Curl(o, f);
+  FoldThumb(o);
+  return o;
+}
+
+// All four fingers, thumb folded in. main.py bound this to the down arrow,
+// and it differs from an open palm by the thumb alone.
+HandObservation FourFingers(std::uint32_t track_id = 1,
+                            Point2 origin = {0.5f, 0.8f}) {
+  HandObservation o = OpenPalm(track_id, origin);
   FoldThumb(o);
   return o;
 }
@@ -198,9 +217,57 @@ TEST(GestureScore, RecognizesEachPoseAsItsOwnGesture) {
                                hc::ComputeFeatures(ThumbUp()), c), 1.0f);
   EXPECT_FLOAT_EQ(GestureScore(GestureKind::PointIndex,
                                hc::ComputeFeatures(PointIndex()), c), 1.0f);
-  EXPECT_FLOAT_EQ(GestureScore(GestureKind::TwoFingerScroll,
-                               hc::ComputeFeatures(TwoFingerScroll()), c),
-                  1.0f);
+  EXPECT_FLOAT_EQ(GestureScore(GestureKind::TwoFingers,
+                               hc::ComputeFeatures(TwoFingers()), c), 1.0f);
+  EXPECT_FLOAT_EQ(GestureScore(GestureKind::PinkyOnly,
+                               hc::ComputeFeatures(PinkyOnly()), c), 1.0f);
+  EXPECT_FLOAT_EQ(GestureScore(GestureKind::FourFingers,
+                               hc::ComputeFeatures(FourFingers()), c), 1.0f);
+}
+
+// Every pose must latch as its OWN kind and no other. With nine kinds scored
+// from the same five booleans, two of them differing by a single finger, this
+// is the test that catches a target pattern typed wrong -- a mistake that
+// would otherwise show up as the wrong command firing on a real hand.
+TEST(GestureRecognizer, EachPoseLatchesAsItsOwnKind) {
+  struct Case {
+    const char* label;
+    HandObservation pose;
+    GestureKind expected;
+  };
+  const Case cases[] = {
+      {"open_palm", OpenPalm(), GestureKind::OpenPalm},
+      {"fist", Fist(), GestureKind::Fist},
+      {"pinch", PinchAt(0.05f), GestureKind::Pinch},
+      {"point_index", PointIndex(), GestureKind::PointIndex},
+      {"two_fingers", TwoFingers(), GestureKind::TwoFingers},
+      {"thumb_up", ThumbUp(), GestureKind::ThumbUp},
+      {"pinky_only", PinkyOnly(), GestureKind::PinkyOnly},
+      {"four_fingers", FourFingers(), GestureKind::FourFingers},
+  };
+
+  for (const Case& c : cases) {
+    GestureRecognizer r(GestureConfig::Default());
+    std::vector<GestureEvent> out;
+    r.Process({c.pose}, 0, out);
+    ASSERT_EQ(out.size(), 1u) << c.label << " produced no gesture";
+    EXPECT_EQ(out[0].kind, c.expected)
+        << c.label << " latched as " << hc::GestureKindName(out[0].kind);
+  }
+}
+
+// FourFingers and OpenPalm differ by the thumb alone, so at 0.9 enter each
+// must exclude the other: 4/5 = 0.8 does not clear the threshold. If the
+// thumb were ignored they would be indistinguishable.
+TEST(GestureRecognizer, OpenPalmAndFourFingersDoNotCollide) {
+  const GestureConfig c = GestureConfig::Default();
+  EXPECT_FLOAT_EQ(GestureScore(GestureKind::FourFingers,
+                               hc::ComputeFeatures(OpenPalm()), c), 0.8f);
+  EXPECT_FLOAT_EQ(GestureScore(GestureKind::OpenPalm,
+                               hc::ComputeFeatures(FourFingers()), c), 0.8f);
+  const float enter =
+      c.thresholds[static_cast<std::size_t>(GestureKind::OpenPalm)].enter;
+  EXPECT_LT(0.8f, enter) << "one finger apart must not be enough to latch";
 }
 
 TEST(GestureScore, NoneNeverScores) {

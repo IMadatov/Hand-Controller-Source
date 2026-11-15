@@ -13,11 +13,34 @@
 # synthetic landmark sequences with no camera and no display.
 add_library(hc_control STATIC
   src/gesture_recognizer.cpp
+  src/command.cpp
+  src/bindings.cpp
 )
 
 target_include_directories(hc_control PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# The shipped default configuration is compiled in, expanded from the very
+# file that is installed rather than retyped into a string literal. Two copies
+# of a configuration format desynchronize on the first edit to either, and
+# nothing would report it.
+set(HC_DEFAULT_BINDINGS_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt")
+file(READ "${HC_DEFAULT_BINDINGS_FILE}" HC_DEFAULT_BINDINGS_TEXT)
+
+# file(READ) creates no dependency of its own, so without this an edit to the
+# .txt would not re-run CMake and the binary would keep the stale text.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${HC_DEFAULT_BINDINGS_FILE}")
+
+configure_file(default_bindings.hpp.in
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/hc/default_bindings.hpp" @ONLY)
+
+# PRIVATE: the generated header is an implementation detail of bindings.cpp.
+# DefaultBindingsText() in the public header is how callers reach the text.
+target_include_directories(hc_control PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # hc_vision for HandObservation and HandFeatures, which are the layer's whole
 # input. PUBLIC because they appear in hc_control's own signatures.

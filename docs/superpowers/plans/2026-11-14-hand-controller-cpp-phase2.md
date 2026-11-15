@@ -341,6 +341,67 @@ TEST(Bindings, RejectsOutOfRangeSmoothing) { /* must be 0..1 */ }
 
 - [ ] **Step 2–5** as before. Commit: `feat: configurable gesture-to-command bindings`
 
+### How Tasks 4 and 5 actually landed, and why they diverge
+
+Transcribing `main.py`'s real bindings exposed three things the plan's
+interfaces could not express. Each change below is a correction, not a
+preference, and none of it is a cost to revisit later because no configuration
+exists outside this repository yet.
+
+**1. The gesture vocabulary was incomplete for the stated parity goal.**
+`main.py`'s left hand binds *pinky only* to the left arrow and *four fingers,
+thumb folded* to the down arrow. Task 2's enum had neither, so "parity with
+`main.py`" was arithmetically unreachable. Added `PinkyOnly` and
+`FourFingers`; `kGestureKindCount` is now 9.
+
+`TwoFingerScroll` is renamed `TwoFingers`. Every other name describes a pose,
+and this one named an action — one the default configuration does not even
+use, since `main.py` binds index-and-middle to a *click*. A kind whose name
+contradicts its own default binding is a trap.
+
+**2. `Binding::hand` is a new `HandSelector`, not `Handedness`.** `Handedness`
+has exactly three values and the third is `Unknown`, which describes the
+model's uncertainty rather than anything a user would write in a file. Phase 1
+measured that label's confidence as low as 0.575, so `Unknown` arrives often —
+and with only `left` and `right` bindable, every gesture an unlabelled hand
+made would silently do nothing. `HandSelector::Any` matches all three and is
+the reason the type exists.
+
+**3. `Command` carries `MouseButton` and `Key` enums, not `int button; int
+key;`.** The plan's field types say `int` but its prose says "`key` is an
+abstract keysym-like enum" — the enums follow the prose. The `Key` list is
+deliberately short: every entry has to be translated in *every* sink, so a
+generous enum is a promise each new platform then has to keep.
+
+Three rules were added that the plan did not ask for:
+
+- **Overlap rejection, not just duplicate rejection.** `any pinch began`
+  alongside `left pinch began` is not a textual duplicate, but a left hand
+  satisfies both and would fire two commands from one gesture.
+- **Every `key_press` must have a matching `key_release` on `ended`,** for the
+  same hand, gesture and key. The plan calls a stuck modifier the most likely
+  way this build hurts someone; a configuration is the easiest place to cause
+  one, so it is rejected at load with a message saying what line to add.
+- **Non-finite settings are rejected.** Every comparison against NaN is false,
+  so `set smoothing nan` passes a naive `v >= 0 && v <= 1` check and the
+  mapper then multiplies by it.
+
+**The default configuration binds double-click to `pinch`,** where `main.py`
+used thumb-and-index-both-extended. That pose differs from `main.py`'s own
+cursor pose by the thumb alone, and the thumb is the least reliable landmark
+here precisely because `hand_features.cpp`'s splay threshold is still
+uncalibrated (see the Task 3 note above). A pinch is measured from the
+distance between two fingertips, needs no thumb threshold, and cannot be
+confused with pointing. The *command* is the same; the pose is deliberately
+different.
+
+**`DefaultBindingsText()` is generated from `config/default_bindings.txt` by
+CMake** rather than retyped into a string literal, so the shipped file and the
+compiled-in fallback are the same bytes by construction. `file(READ)` creates
+no reconfigure dependency on its own, so the directory's
+`CMAKE_CONFIGURE_DEPENDS` carries one explicitly — without it an edit to the
+`.txt` would leave a stale string in the binary.
+
 ---
 
 ## Task 6: `ActionMapper`

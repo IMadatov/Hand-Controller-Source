@@ -47,6 +47,13 @@ hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_vision)
 # through the state machine, so they need no camera, no display and no model.
 hc_add_test(test_gesture_recognizer test_gesture_recognizer.cpp LIBS hc_control)
 
+hc_add_test(test_bindings test_bindings.cpp LIBS hc_control)
+# The path is injected rather than hardcoded so the test can check that the
+# text CMake compiled into hc_control is still the text in the shipped file.
+target_compile_definitions(test_bindings PRIVATE
+  HC_DEFAULT_BINDINGS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt"
+)
+
 # hc_vision_ort — the ONNX Runtime backend, and the only tests that load
 # real model files.
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)
