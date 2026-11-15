@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstring>
+#include <string>
 
 namespace hc {
 namespace {
@@ -117,6 +118,19 @@ bool GestureKindFromName(const char* name, GestureKind& out) {
     }
   }
   return false;
+}
+
+const char* GesturePhaseName(GestureEvent::Phase phase) {
+  switch (phase) {
+    case GestureEvent::Phase::Began: return "began";
+    case GestureEvent::Phase::Held: return "held";
+    case GestureEvent::Phase::Ended: return "ended";
+  }
+  return "began";
+}
+
+std::string DescribeGesture(GestureKind kind, GestureEvent::Phase phase) {
+  return std::string(GestureKindName(kind)) + " " + GesturePhaseName(phase);
 }
 
 float GestureScore(GestureKind kind, const HandFeatures& f,

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "hc/geometry.hpp"
 #include "hc/hand_observation.hpp"
@@ -108,5 +109,21 @@ struct GestureEvent {
   // sequence is carried faithfully rather than being corrected or rejected.
   std::int64_t timestamp_us;
 };
+
+// "began", "held", "ended" -- the same strings the bindings file uses in its
+// phase column.
+//
+// One spelling per concept, in one place: a HUD, a log line, a generated
+// contract and a configuration file that each named the phases their own way
+// would teach a user they were looking at three different things.
+const char* GesturePhaseName(GestureEvent::Phase phase);
+
+// A gesture and its phase as one short string, e.g. "point_index held".
+//
+// Lives here, with the vocabulary, rather than in whichever frontend wanted
+// it first. The overlay HUD, the GUI and a log line all want the same words,
+// and the platform layer in particular must not be the one deciding them --
+// it translates, it does not name.
+std::string DescribeGesture(GestureKind kind, GestureEvent::Phase phase);
 
 }  // namespace hc

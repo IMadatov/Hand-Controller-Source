@@ -1,6 +1,7 @@
 #include "overlay.hpp"
 
 #include <array>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -175,4 +176,127 @@ TEST(Overlay, LargeTrackIdSelectsAColorWithoutIndexingOutOfRange) {
   DrawObservations(bgr, std::vector<HandObservation>{obs});
 
   EXPECT_NE(bgr.at<cv::Vec3b>(240, 320), cv::Vec3b(0, 0, 0));
+}
+
+// --- Task 12: the per-hand gesture captions ------------------------------
+
+namespace {
+
+// Pixels written inside the band where a caption anchored to `obs` should
+// land: above the hand's topmost landmark. Counting rather than sampling one
+// pixel, because where exactly a glyph falls depends on the font.
+int NonZeroAbove(const cv::Mat& bgr, Point2 anchor) {
+  const int cx = static_cast<int>(anchor.x * kWidth);
+  const int cy = static_cast<int>(anchor.y * kHeight);
+  const int x0 = std::max(0, cx - 120);
+  const int x1 = std::min(bgr.cols, cx + 120);
+  const int y0 = std::max(0, cy - 32);
+  const int y1 = std::max(0, cy);
+
+  int count = 0;
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      if (bgr.at<cv::Vec3b>(y, x) != cv::Vec3b(0, 0, 0)) ++count;
+    }
+  }
+  return count;
+}
+
+}  // namespace
+
+// The acceptance criterion for two-hand tracking, as seen on screen: both
+// hands' gestures must be named at once, each beside its own hand.
+TEST(Overlay, LabelsBothHandsAtTheirOwnPositions) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+
+  const Point2 left_at{0.25f, 0.5f};
+  const Point2 right_at{0.75f, 0.5f};
+  const std::vector<HandObservation> obs{MakeObservation(0, left_at),
+                                         MakeObservation(1, right_at)};
+  const std::vector<hc::HandLabel> labels{{0, "thumb_up began"},
+                                          {1, "point_index held"}};
+
+  hc::DrawHandLabels(bgr, obs, labels);
+
+  EXPECT_GT(NonZeroAbove(bgr, left_at), 0);
+  EXPECT_GT(NonZeroAbove(bgr, right_at), 0);
+}
+
+// Each caption takes the colour of the hand it describes, so a glance pairs
+// them up without reading the text.
+TEST(Overlay, LabelTakesItsOwnHandsTrackColor) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+
+  const std::vector<HandObservation> obs{MakeObservation(0, {0.25f, 0.5f}),
+                                         MakeObservation(1, {0.75f, 0.5f})};
+  hc::DrawHandLabels(bgr, obs, {{0, "fist held"}, {1, "fist held"}});
+
+  // The same text on both hands, so a difference in the pixels can only come
+  // from the colour.
+  std::set<std::array<int, 3>> colors;
+  for (int y = 0; y < bgr.rows; ++y) {
+    for (int x = 0; x < bgr.cols; ++x) {
+      const cv::Vec3b p = bgr.at<cv::Vec3b>(y, x);
+      // Skip the black outline and the antialiased blend towards it.
+      if (p[0] + p[1] + p[2] < 200) continue;
+      colors.insert({p[0], p[1], p[2]});
+    }
+  }
+  EXPECT_GE(colors.size(), 2u) << "both captions came out the same colour";
+}
+
+// The usual cause is a hand that left the frame on the same frame its gesture
+// ended: there is an event, but no observation to anchor its caption to.
+TEST(Overlay, LabelForAnAbsentTrackIsSkipped) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+  const std::vector<HandObservation> obs{MakeObservation(0, {0.5f, 0.5f})};
+
+  hc::DrawHandLabels(bgr, obs, {{99, "fist ended"}});
+
+  EXPECT_EQ(cv::countNonZero(bgr.reshape(1)), 0);
+}
+
+TEST(Overlay, EmptyLabelTextDrawsNothing) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+  const std::vector<HandObservation> obs{MakeObservation(0, {0.5f, 0.5f})};
+
+  hc::DrawHandLabels(bgr, obs, {{0, ""}});
+
+  EXPECT_EQ(cv::countNonZero(bgr.reshape(1)), 0);
+}
+
+// A hand at the very top of the frame: the caption has nowhere above to go,
+// and putText CLIPS text drawn off-canvas rather than moving it -- so the
+// label would vanish exactly when a user is most likely to wonder what it
+// says.
+TEST(Overlay, LabelStaysVisibleForAHandAtTheTopEdge) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+  const std::vector<HandObservation> obs{MakeObservation(3, {0.5f, 0.0f})};
+
+  hc::DrawHandLabels(bgr, obs, {{3, "open_palm held"}});
+
+  EXPECT_GT(cv::countNonZero(bgr.reshape(1)), 0);
+}
+
+// Same for a hand against the right edge, where a centred caption would run
+// off the side.
+TEST(Overlay, LabelStaysVisibleForAHandAtTheRightEdge) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+  const std::vector<HandObservation> obs{MakeObservation(3, {1.0f, 0.5f})};
+
+  hc::DrawHandLabels(bgr, obs, {{3, "four_fingers began"}});
+
+  EXPECT_GT(cv::countNonZero(bgr.reshape(1)), 0);
+}
+
+// Run under ASan: nothing may be written outside the frame buffer when the
+// landmarks are not finite and there is nothing to anchor to.
+TEST(Overlay, NonFiniteLandmarksLeaveTheLabelUndrawnWithoutCrashing) {
+  cv::Mat bgr = cv::Mat::zeros(kHeight, kWidth, CV_8UC3);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const std::vector<HandObservation> obs{MakeObservation(0, {nan, nan})};
+
+  hc::DrawHandLabels(bgr, obs, {{0, "fist held"}});
+
+  EXPECT_EQ(cv::countNonZero(bgr.reshape(1)), 0);
 }

@@ -31,3 +31,12 @@ endif()
 # core-only configure.
 add_executable(dump_contract dump_contract.cpp)
 target_link_libraries(dump_contract PRIVATE hc_control)
+
+# bench_control — the per-frame cost of gesture recognition, mapping and
+# dispatch, measured with two hands holding bound gestures.
+#
+# A tool rather than a Metrics stage because there is no camera here: the real
+# binary sees no hands, and these layers over an empty observation list
+# measure nothing. Links hc_control only.
+add_executable(bench_control bench_control.cpp)
+target_link_libraries(bench_control PRIVATE hc_control)

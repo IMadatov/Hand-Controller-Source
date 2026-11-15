@@ -116,6 +116,11 @@ that way and say so.
 | `--max-hands N` | Hands to track, 1..32 (default: 2) |
 | `--frames N` | Stop after N frames; 0 = until quit (default: 0) |
 | `--threads N` | ONNX Runtime intra-op threads (default: 1) |
+| `--bindings PATH` | Gesture bindings file (default: the compiled-in one) |
+| `--sensitivity F` | Cursor speed multiplier, > 0; overrides the file |
+| `--smoothing F` | Cursor smoothing, 0..1; overrides the file |
+| `--sink NAME` | `null`, `log` or `xtest` (default: **`null`**) |
+| `--no-inject` | Force the null sink, whatever `--sink` says |
 | `--headless` | No preview window |
 | `--report PATH` | Also write the timing report to PATH |
 | `--help` | Print usage |
@@ -138,10 +143,122 @@ the palm detector re-runs on every frame in which any slot is empty. Setting
 `2` in a scene that only ever shows one hand pays a palm detection
 (~8 ms) on every frame. Set it to the number of hands you mean to track.
 
+## Gestures, bindings and input injection
+
+A pose is recognized, mapped to an abstract command, and handed to a sink. The
+first two steps are portable and the third is the only one that touches the
+operating system — so the same gesture means the same thing everywhere, and
+only the injection differs per platform.
+
+### Nothing is injected unless you ask
+
+**`--sink null` is the default.** Development happens on the same desktop this
+program would seize, and a build that grabs the cursor the moment it starts is
+hostile to the person writing it. `--sink log` prints what the gestures *would*
+have done. `--no-inject` forces null over an explicit `--sink`, in either order
+on the command line.
+
+### Wayland: XTest reports success and does nothing
+
+> On a **Wayland** session, `XTestFakeMotionEvent` returns success and the
+> cursor does not move. The extension reports itself present at version 2.2,
+> `libXtst.so.6` is there, and every signal short of reading the pointer back
+> says it works.
+
+This is measured, not assumed — `cpp/tools/xtest_probe` is committed so it is
+repeatable:
+
+```
+$ ./cpp/build/tools/xtest_probe
+XTestQueryExtension: present=1 version=2.2
+pointer before: 1920,540
+XTestFakeMotionEvent returned 1 (asked for 2057,631)
+pointer after:  1920,540
+RESULT: XTest SILENTLY DID NOTHING (returned success, no move)
+```
+
+Consequently **`--sink xtest` is not built yet** and refuses with that
+explanation rather than pretending: a sink that reports success while moving
+nothing is the exact failure this project is trying not to ship. Real X11
+injection needs an X11 session; Wayland needs `libei`, which is a larger piece
+of work and out of scope.
+
+### The bindings file
+
+Flat line-oriented text — not JSON, which would mean either a fetched
+dependency (forbidden here) or a hand-rolled parser larger than the layer it
+configures. The shipped configuration is `config/default_bindings.txt`, and it
+is **compiled into the binary**, so the program works with no file present.
+
+```
+<hand> <gesture> <phase> -> <command> [arg]
+
+set sensitivity 2.0
+set smoothing 0.5
+
+right point_index held  -> move_cursor
+right two_fingers began -> click left
+left  thumb_up    began -> key_press   arrow_right
+left  thumb_up    ended -> key_release arrow_right
+```
+
+- **hand** — `any` | `left` | `right`. `any` also matches an **unlabelled**
+  hand, which matters: handedness confidence was measured as low as 0.575, so
+  `Unknown` arrives often and `left`/`right` alone would silently ignore it.
+- **gesture** — `pinch`, `fist`, `open_palm`, `point_index`, `two_fingers`,
+  `thumb_up`, `pinky_only`, `four_fingers`. Each names the **pose**, never the
+  action, because any pose can be bound to anything.
+- **phase** — `began` fires once, `held` fires every frame, `ended` fires on
+  release.
+- **command** — `move_cursor`, `scroll`, `click`, `double_click`, `key_press`,
+  `key_release`. `click`/`double_click` take an optional button (default
+  `left`); the key commands require a key name; `move_cursor`/`scroll` take no
+  argument.
+
+Two rules are **enforced at load**, and a file breaking either is rejected
+rather than half-applied:
+
+1. No two bindings may overlap on the same gesture and phase. `any` overlaps
+   `left` and `right`, so `any pinch began` plus `left pinch began` is an
+   error even though the lines differ.
+2. Every `key_press` must have a matching `key_release` on the `ended` phase.
+   A key still down outlives the process, and a configuration is the easiest
+   place to cause one.
+
+An **empty** configuration is valid and means no bindings. It is not an error.
+
+### One behaviour worth knowing before you tune anything
+
+Five pairs in the vocabulary differ by a single finger — `fist`/`point_index`,
+`fist`/`thumb_up`, `fist`/`pinky_only`, `open_palm`/`four_fingers`,
+`point_index`/`two_fingers`. A gesture survives one finger of flicker on
+purpose, so switching between two of those takes a **confirmed takeover**: the
+old gesture `ended`s on one frame and the new one `began`s on a later one (two
+frames by default, ~20 ms). Point to move the cursor and raise the middle
+finger to click, and that is the path being taken.
+
+### For a UI built on top of this
+
+`cpp/tools/dump_contract` emits the whole vocabulary, the shipped
+configuration, the validation rules and a real recognizer session as JSON,
+generated from the code rather than transcribed from it:
+
+```bash
+cmake --build cpp/build --target dump_contract
+./cpp/build/tools/dump_contract > contract.json
+```
+
+Prose version and the layering rules:
+`docs/superpowers/specs/2026-11-15-gui-contract.md`.
+
 ## Measurements
 
 `docs/superpowers/reports/2026-11-12-phase1-measurements.md`. Headline: the
 second hand costs **+95%** per frame — it shares no work with the first.
+
+Gesture recognition, mapping and dispatch together cost **~0.0013 ms per
+frame** with two hands — about 0.01% of the tracker. Re-measure with
+`cpp/build/tools/bench_control`.
 
 ## Platform support
 

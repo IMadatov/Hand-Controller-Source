@@ -241,6 +241,8 @@ int main(int argc, char** argv) {
   // Held across the loop and refilled by the poll calls, so the steady state
   // does not allocate.
   std::vector<hc::HandObservation> observations;
+  std::vector<hc::GestureEvent> events;
+  std::vector<hc::HandLabel> labels;
 
   // Wall-clock span of the whole loop. Reported alongside the per-stage table
   // because it is the only number here that includes everything -- capture
@@ -252,7 +254,18 @@ int main(int argc, char** argv) {
     if (!overlay) continue;
 
     controller.PollObservations(observations);
-    overlay->Render(controller.LastFrame().view, observations,
+
+    // One caption per gesture event, which is at most one per hand per frame.
+    // The words come from hc_control: the overlay places text, it does not
+    // decide what a pose is called.
+    controller.PollEvents(events);
+    labels.clear();
+    for (const hc::GestureEvent& e : events) {
+      labels.push_back(
+          hc::HandLabel{e.track_id, hc::DescribeGesture(e.kind, e.phase)});
+    }
+
+    overlay->Render(controller.LastFrame().view, observations, labels,
                     BuildHud(opts, controller.ProcessedFrames(),
                              observations.size(), capture->dropped(),
                              sink_status));

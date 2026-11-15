@@ -112,6 +112,68 @@ void DrawObservations(cv::Mat& bgr, const std::vector<HandObservation>& obs) {
   }
 }
 
+void DrawHandLabels(cv::Mat& bgr, const std::vector<HandObservation>& obs,
+                    const std::vector<HandLabel>& labels) {
+  if (bgr.empty() || bgr.type() != CV_8UC3) return;
+
+  const int width = bgr.cols;
+  const int height = bgr.rows;
+
+  for (const HandLabel& label : labels) {
+    if (label.text.empty()) continue;
+
+    for (const HandObservation& hand : obs) {
+      if (hand.track_id != label.track_id) continue;
+
+      // Anchored to the hand's HIGHEST valid landmark, so the caption sits
+      // above the fingertips of an upright hand instead of across them. The
+      // topmost point is used rather than the wrist because the wrist is at
+      // the bottom of an upright hand and a caption there lands on the arm.
+      int top_x = 0;
+      int top_y = height;
+      bool found = false;
+      for (const Point2& p : hand.landmarks) {
+        cv::Point pixel;
+        if (!ToPixelPoint(p, width, height, pixel)) continue;
+        if (!found || pixel.y < top_y) {
+          top_x = pixel.x;
+          top_y = pixel.y;
+          found = true;
+        }
+      }
+      if (!found) break;  // Every landmark non-finite; nothing to anchor to.
+
+      // Clamped so a hand at the top or the right edge still shows its whole
+      // caption. cv::putText silently clips text drawn off-canvas, which
+      // would make the label vanish exactly when the hand is at an edge --
+      // the moment a user is most likely to be wondering what it says.
+      const int kTextHeight = 18;
+      const int kGap = 8;
+      const double kScale = 0.5;
+      const int baseline =
+          std::min(std::max(top_y - kGap, kTextHeight), height - 2);
+      const cv::Size text =
+          cv::getTextSize(label.text, cv::FONT_HERSHEY_SIMPLEX, kScale, 1,
+                          nullptr);
+      const int x = std::min(std::max(top_x - text.width / 2, 2),
+                             std::max(2, width - text.width - 2));
+
+      const Bgr& v = kTrackColors[hand.track_id % kTrackColorCount];
+
+      // Drawn twice: a dark outline under the coloured text, because a thin
+      // coloured glyph over a camera image is unreadable about half the time
+      // and the palette is chosen for the skeleton, not for contrast.
+      cv::putText(bgr, label.text, cv::Point(x, baseline),
+                  cv::FONT_HERSHEY_SIMPLEX, kScale, cv::Scalar(0, 0, 0), 3,
+                  cv::LINE_AA);
+      cv::putText(bgr, label.text, cv::Point(x, baseline),
+                  cv::FONT_HERSHEY_SIMPLEX, kScale,
+                  cv::Scalar(v.b, v.g, v.r), 1, cv::LINE_AA);
+      break;  // One hand per label.
+    }
+  }
+}
+
 Overlay::Overlay(std::string window_title) : title_(std::move(window_title)) {}
 
 Overlay::~Overlay() {
@@ -119,6 +181,7 @@ Overlay::~Overlay() {
 }
 
 void Overlay::Render(const ImageView& frame, const std::vector<HandObservation>& obs,
+                     const std::vector<HandLabel>& labels,
                      const std::string& hud) {
   if (frame.data == nullptr || frame.width <= 0 || frame.height <= 0) return;
 
@@ -146,6 +209,7 @@ void Overlay::Render(const ImageView& frame, const std::vector<HandObservation>&
   }
 
   DrawObservations(canvas, obs);
+  DrawHandLabels(canvas, obs, labels);
 
   // The HUD, one line per '\n', in the top-left corner.
   int baseline_y = 24;

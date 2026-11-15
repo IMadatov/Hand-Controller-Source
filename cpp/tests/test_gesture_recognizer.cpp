@@ -1,6 +1,7 @@
 #include "hc/gesture_recognizer.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -723,4 +724,42 @@ TEST(GestureRecognizer, ExcessTracksAreIgnoredNotRecycled) {
   r.Process(hands, 0, out);
   EXPECT_EQ(out.size(), hc::kMaxGestureTracks);
   EXPECT_EQ(CountPhase(out, Phase::Held), static_cast<int>(hc::kMaxGestureTracks));
+}
+
+// --- the published spelling of a gesture ---------------------------------
+
+TEST(GestureNames, PhaseNamesMatchTheBindingsFileColumn) {
+  EXPECT_STREQ(hc::GesturePhaseName(Phase::Began), "began");
+  EXPECT_STREQ(hc::GesturePhaseName(Phase::Held), "held");
+  EXPECT_STREQ(hc::GesturePhaseName(Phase::Ended), "ended");
+}
+
+// The overlay HUD's acceptance criterion, and the owner's target behaviour
+// read off the screen: with two hands in frame, BOTH gestures are named, each
+// one its own. A single shared caption would have been the obvious bug.
+TEST(GestureNames, TwoHandsAreDescribedIndependently) {
+  const std::string right =
+      hc::DescribeGesture(GestureKind::PointIndex, Phase::Held);
+  const std::string left =
+      hc::DescribeGesture(GestureKind::ThumbUp, Phase::Began);
+
+  EXPECT_EQ(right, "point_index held");
+  EXPECT_EQ(left, "thumb_up began");
+  EXPECT_NE(right, left);
+}
+
+// Every kind and phase produces a non-empty description naming its own kind,
+// so a kind added to the enum cannot reach a HUD as an empty caption.
+TEST(GestureNames, EveryKindAndPhaseDescribesItself) {
+  const Phase phases[] = {Phase::Began, Phase::Held, Phase::Ended};
+  for (std::size_t i = 0; i < hc::kGestureKindCount; ++i) {
+    const GestureKind kind = static_cast<GestureKind>(i);
+    for (const Phase phase : phases) {
+      const std::string text = hc::DescribeGesture(kind, phase);
+      EXPECT_NE(text.find(hc::GestureKindName(kind)), std::string::npos)
+          << text;
+      EXPECT_NE(text.find(hc::GesturePhaseName(phase)), std::string::npos)
+          << text;
+    }
+  }
 }

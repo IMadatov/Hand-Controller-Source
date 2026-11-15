@@ -27,6 +27,31 @@ namespace hc {
 // is the whole reason it is a free function rather than a private method.
 void DrawObservations(cv::Mat& bgr, const std::vector<HandObservation>& obs);
 
+// A caption to draw beside one hand -- its current gesture, typically.
+//
+// Text, not a GestureKind: this layer TRANSLATES, it does not name. What a
+// pose is called is hc_control's vocabulary (DescribeGesture), and a platform
+// layer that spelled the gestures itself would hold one spelling per
+// operating system.
+struct HandLabel {
+  std::uint32_t track_id;
+  std::string text;
+};
+
+// Draws each label beside the hand with the matching `track_id`, in that
+// hand's own track colour, so the caption and the skeleton it describes are
+// the same colour.
+//
+// A label whose track_id matches no observation is SKIPPED rather than drawn
+// somewhere arbitrary: the usual cause is a hand that left the frame on the
+// very frame its gesture ended, and a caption floating over an empty corner
+// would be a worse answer than none.
+//
+// Call after DrawObservations, so the text sits on top of the skeleton rather
+// than under it.
+void DrawHandLabels(cv::Mat& bgr, const std::vector<HandObservation>& obs,
+                    const std::vector<HandLabel>& labels);
+
 // Decides whether the preview window has been closed by the user, given the
 // value OpenCV's getWindowProperty(WND_PROP_VISIBLE) returned and whether the
 // window has ever been seen visible.
@@ -52,14 +77,14 @@ class Overlay {
   Overlay(const Overlay&) = delete;
   Overlay& operator=(const Overlay&) = delete;
 
-  // Copies `frame`, draws `obs` and `hud` onto the copy, and shows it. The
-  // source pixels are never modified: ImageView is a read-only view into
-  // storage the frame source owns and may reuse.
+  // Copies `frame`, draws `obs`, `labels` and `hud` onto the copy, and shows
+  // it. The source pixels are never modified: ImageView is a read-only view
+  // into storage the frame source owns and may reuse.
   //
   // Also pumps the UI event loop, which is why ShouldQuit's answer is only
   // current after a Render call.
   void Render(const ImageView& frame, const std::vector<HandObservation>& obs,
-              const std::string& hud);
+              const std::vector<HandLabel>& labels, const std::string& hud);
 
   // True once the user has asked to quit: Escape or 'q' pressed, or the
   // window closed. Both conditions matter -- a window closed by its title-bar
