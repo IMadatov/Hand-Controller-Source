@@ -28,7 +28,16 @@ class MockEngine implements HandControllerEngine {
   MockEngine({
     this.frameInterval = const Duration(milliseconds: 35),
     this.simulateSinkUnavailable = true,
-  });
+    DateTime Function()? clock,
+  }) : _now = clock ?? DateTime.now;
+
+  /// Where the timestamps on [CommandRecord] come from.
+  ///
+  /// Injected rather than read, which is the same rule the C++ recognizer
+  /// follows: it never reads a clock it was not handed. Here it also makes
+  /// the whole engine deterministic, so a rendered screenshot of the command
+  /// log is the same on every run.
+  final DateTime Function() _now;
 
   /// ~28 fps, which is roughly what the mockups show.
   final Duration frameInterval;
@@ -431,7 +440,7 @@ class MockEngine implements HandControllerEngine {
         handedness: event.handedness,
         gesture: event.kind,
         phase: event.phase,
-        at: DateTime.now(),
+        at: _now(),
 
         // Produced either way. Whether anything moved is a different
         // question, and conflating the two is how a UI ends up claiming to

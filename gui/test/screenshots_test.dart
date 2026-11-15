@@ -8,9 +8,11 @@
 /// Refresh with:
 ///   flutter test --update-goldens test/screenshots_test.dart
 ///
-/// These are review artifacts, NOT assertions about pixels. Do not treat a
-/// diff here as a failure — a golden test that fails whenever a colour
-/// changes trains everyone to run `--update-goldens` without looking.
+/// The engine is deterministic — fixed frame interval, no randomness, and an
+/// injected clock — so these do hold as assertions, and a diff means the UI
+/// changed. They are still primarily REVIEW ARTIFACTS: when a change is
+/// intended, look at the new PNG before running `--update-goldens`, rather
+/// than updating reflexively.
 library;
 
 import 'dart:io';
@@ -70,9 +72,16 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    // A fixed interval and no randomness anywhere means the scripted hands
-    // are at a known pose after a known number of frames.
-    final engine = MockEngine(frameInterval: const Duration(milliseconds: 35));
+    // A fixed interval, no randomness, and a clock derived from the frame
+    // count means every pixel below is a function of the pump schedule. The
+    // command log would otherwise carry wall-clock timestamps and these
+    // screenshots would differ on every run.
+    var tick = 0;
+    final engine = MockEngine(
+      frameInterval: const Duration(milliseconds: 35),
+      clock: () => DateTime.utc(2026, 1, 1, 9, 30)
+          .add(Duration(milliseconds: 35 * tick++)),
+    );
     engine.start();
 
     await tester.pumpWidget(HandControllerApp(engine: engine));

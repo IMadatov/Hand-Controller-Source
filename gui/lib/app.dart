@@ -6,6 +6,7 @@ import 'screens/bindings_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'screens/live_view.dart';
 import 'screens/settings_screen.dart';
+import 'state/bindings_controller.dart';
 import 'theme/app_theme.dart';
 import 'theme/tokens.dart';
 import 'widgets/common.dart';
@@ -35,17 +36,56 @@ class EngineScope extends InheritedWidget {
       oldWidget.engine != engine;
 }
 
-class HandControllerApp extends StatelessWidget {
+/// Hands the working [BindingSet] down the tree.
+///
+/// Above the screens rather than inside one, because Commands and Settings
+/// edit the same configuration: the sensitivity and smoothing sliders are
+/// fields of the binding set, not separate preferences.
+class BindingsScope extends InheritedNotifier<BindingsController> {
+  const BindingsScope({
+    super.key,
+    required BindingsController controller,
+    required super.child,
+  }) : super(notifier: controller);
+
+  static BindingsController of(BuildContext context) {
+    final scope =
+        context.dependOnInheritedWidgetOfExactType<BindingsScope>();
+    assert(scope != null, 'No BindingsScope above this widget');
+    return scope!.notifier!;
+  }
+}
+
+class HandControllerApp extends StatefulWidget {
   const HandControllerApp({super.key, required this.engine});
 
   final HandControllerEngine engine;
+
+  @override
+  State<HandControllerApp> createState() => _HandControllerAppState();
+}
+
+class _HandControllerAppState extends State<HandControllerApp> {
+  late final _bindings = BindingsController(widget.engine)..load();
+
+  @override
+  void dispose() {
+    _bindings.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Hand Controller',
         debugShowCheckedModeBanner: false,
         theme: buildHcTheme(),
-        home: EngineScope(engine: engine, child: const AppShell()),
+        home: EngineScope(
+          engine: widget.engine,
+          child: BindingsScope(
+            controller: _bindings,
+            child: const AppShell(),
+          ),
+        ),
       );
 }
 
