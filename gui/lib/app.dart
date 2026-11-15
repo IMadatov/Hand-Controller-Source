@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import 'domain/observation.dart';
@@ -86,8 +88,39 @@ class _HandControllerAppState extends State<HandControllerApp> {
   late final _bindings = BindingsController(widget.engine)..load();
   final _settings = AppSettings();
 
+  /// Stops the engine before the process tears itself down.
+  ///
+  /// WITHOUT THIS THE APP ABORTS ON EXIT. Closing the window ran no Dart
+  /// cleanup, so the native worker thread was still capturing while static
+  /// destructors ran, and OpenCV threw out of one of them:
+  ///
+  ///   terminate called after throwing an instance of 'cv::Exception'
+  ///   (-215) key_ != -1 && "Can't fetch data from terminated TLS container."
+  ///
+  /// The crash is the visible half. The other half is worse and silent: the
+  /// engine never got to release what the sink was holding, so a gesture
+  /// holding a key at the moment the window closed left that key down with
+  /// no process left to lift it.
+  ///
+  /// `stop()` rather than `dispose()`: the widget tree is still mounted at
+  /// this point and disposing the state notifier would assert under
+  /// listeners that have not been torn down yet.
+  late final _lifecycle = AppLifecycleListener(
+    onExitRequested: () async {
+      await widget.engine.stop();
+      return ui.AppExitResponse.exit;
+    },
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle; // force creation
+  }
+
   @override
   void dispose() {
+    _lifecycle.dispose();
     _bindings.dispose();
     _settings.dispose();
     super.dispose();
