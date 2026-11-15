@@ -25,13 +25,62 @@ option(HC_BUILD_APP "Build the OpenCV-based application target" ON)
 include(cmake/FetchOpenCV.cmake)
 
 add_subdirectory(tools)
-add_subdirectory(core)
 
-# The OpenCV-dependent layer. Guarded so that a core-only configure
-# (-DHC_BUILD_APP=OFF) builds no OpenCV and links none.
+# Added bottom-up, in dependency order, so each hc_assert_does_not_link check
+# sees the targets below it already defined.
+#
+#   base/    hc_base        primitives: geometry, image types, metrics, frame
+#                           sources. No ONNX, no OS, no OpenCV.
+#   vision/  hc_vision      the standalone hand-detection module: anchors,
+#                           palm decode, ROI, warp, association, features.
+#            hc_vision_ort  its ONNX Runtime backend, the only ORT consumer.
+#
+#   control/ hc_control    the logic layer: gesture recognition, commands,
+#                          bindings, mapping. Portable, and the only place
+#                          those decisions are made.
+add_subdirectory(base)
+add_subdirectory(vision)
+add_subdirectory(control)
+
+# platform/ is the per-system layer and the only one that links OpenCV, so it
+# is guarded: a core-only configure (-DHC_BUILD_APP=OFF) builds no OpenCV and
+# links none.
 if(HC_BUILD_APP)
-  add_subdirectory(app)
+  add_subdirectory(platform)
 endif()
+
+# Our static libraries end up inside hc_ffi, which is a SHARED library, so
+# their objects have to be position-independent -- a non-PIC static library
+# cannot be linked into a .so at all.
+#
+# Done per target rather than as a global CMAKE_POSITION_INDEPENDENT_CODE on
+# purpose: the global would also apply to the FETCHED OpenCV and force a
+# 20-40 minute rebuild of a 528 MB build tree, for no benefit to anyone --
+# nothing links OpenCV into a shared object of ours.
+foreach(hc_pic_target hc_base hc_vision hc_vision_ort hc_control hc_platform)
+  if(TARGET ${hc_pic_target})
+    set_property(TARGET ${hc_pic_target}
+                 PROPERTY POSITION_INDEPENDENT_CODE ON)
+  endif()
+endforeach()
+
+# ffi/ is the C ABI shared library, and it is guarded for the same reason the
+# platform layer is: it links the camera and the injector, so it cannot exist
+# in a configure that builds no OpenCV. A host loads this one artifact and
+# sees nothing but the C header.
+if(HC_BUILD_APP)
+  add_subdirectory(ffi)
+endif()
+
+# app/ is NOT guarded. It declares hc_cli, which is portable and whose tests
+# should run in the fast core-only configure; the hand_controller executable
+# inside it guards itself on HC_BUILD_APP.
+add_subdirectory(app)
 
 enable_testing()
 add_subdirectory(tests)
+
+# Last, deliberately. Every hc_assert_* call above only registered an
+# assertion; this is where they run, now that the link graph is final and no
+# later target_link_libraries can sneak in behind them.
+hc_run_layer_checks()

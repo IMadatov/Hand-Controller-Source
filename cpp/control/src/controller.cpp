@@ -1,0 +1,133 @@
+#include "hc/controller.hpp"
+
+#include <chrono>
+#include <utility>
+
+namespace hc {
+
+Controller::Controller(std::unique_ptr<IFrameSource> source,
+                       std::unique_ptr<IHandTracker> tracker,
+                       std::unique_ptr<IOutputSink> sink,
+                       ControllerConfig config, Metrics* metrics)
+    : source_(std::move(source)),
+      tracker_(std::move(tracker)),
+      sink_(std::move(sink)),
+      metrics_(metrics),
+      recognizer_(config.gestures),
+      mapper_(std::move(config.bindings)),
+      frame_limit_(config.frame_limit) {}
+
+Controller::~Controller() { Stop(); }
+
+bool Controller::Start() {
+  if (state_ != State::Idle) return false;
+  if (source_ == nullptr || tracker_ == nullptr) return false;
+  state_ = State::Running;
+  return true;
+}
+
+void Controller::Stop() {
+  if (state_ == State::Stopped) return;
+
+  // Releases FIRST, then close. A key is released through the sink, and a
+  // QueuedSink's ReleaseAll blocks until its worker has drained -- doing this
+  // after tearing anything down would be the one ordering where a key can
+  // stay pressed.
+  if (sink_ != nullptr) sink_->ReleaseAll();
+  if (source_ != nullptr) source_->Close();
+
+  state_ = State::Stopped;
+}
+
+bool Controller::Step() {
+  if (state_ != State::Running) return false;
+
+  if (frame_limit_ > 0 &&
+      processed_ >= static_cast<std::uint64_t>(frame_limit_)) {
+    state_ = State::Ended;
+    return false;
+  }
+
+  // Timed separately because it is time spent waiting on a camera, which is
+  // not a cost this code can optimise; folded into any other stage it would
+  // distort every number in the report.
+  const auto wait_start = std::chrono::high_resolution_clock::now();
+  const bool got = source_->Next(frame_);
+  const auto wait_end = std::chrono::high_resolution_clock::now();
+  if (metrics_ != nullptr) {
+    metrics_->Add(Stage::CaptureWait,
+                  std::chrono::duration<double, std::milli>(wait_end -
+                                                            wait_start)
+                      .count());
+  }
+
+  if (!got) {
+    // Terminal, per IFrameSource. The session is over, but it is not STOPPED:
+    // the caller still has its own shutdown to run, and Stop() is its call.
+    state_ = State::Ended;
+    return false;
+  }
+
+  // Not timed as Stage::Total: the tracker records that stage itself, and a
+  // second sample per frame would push two different quantities into one
+  // histogram and silently corrupt its mean and percentiles.
+  tracker_->Process(frame_.view, frame_.timestamp_us, observations_);
+
+  // The timestamp is the FRAME's, passed straight through. Neither of these
+  // layers reads a clock, which is what lets the whole chain be replayed from
+  // a script in a test.
+  recognizer_.Process(observations_, frame_.timestamp_us, events_);
+  mapper_.Map(events_, commands_, command_origins_);
+
+  // Commands are still PRODUCED and still reported while paused -- a paused
+  // session is one a user is watching, and the point of watching is to see
+  // what the gestures would do. Only the sink is skipped.
+  if (!paused_ && sink_ != nullptr) {
+    for (const Command& c : commands_) sink_->Send(c);
+  }
+
+  ++processed_;
+  return true;
+}
+
+void Controller::PollObservations(std::vector<HandObservation>& out) const {
+  out = observations_;
+}
+
+void Controller::PollCommands(std::vector<Command>& out) const {
+  out = commands_;
+}
+
+void Controller::PollEvents(std::vector<GestureEvent>& out) const {
+  out = events_;
+}
+
+void Controller::PollCommandOrigins(std::vector<std::uint32_t>& out) const {
+  out = command_origins_;
+}
+
+void Controller::SetPaused(bool paused) {
+  if (paused_ == paused) return;
+  paused_ = paused;
+
+  // On the way IN only. Leaving pause presses nothing, and entering it must
+  // not leave a key down for the duration.
+  if (paused_ && sink_ != nullptr) sink_->ReleaseAll();
+}
+
+void Controller::SetSink(std::unique_ptr<IOutputSink> sink) {
+  // The outgoing sink is the only thing that can release what it pressed, and
+  // in a moment it will not exist.
+  if (sink_ != nullptr) sink_->ReleaseAll();
+  sink_ = std::move(sink);
+}
+
+void Controller::SetBindings(BindingSet bindings) {
+  mapper_.SetBindings(std::move(bindings));
+}
+
+bool Controller::SinkAvailable() const {
+  return sink_ != nullptr && sink_->Available();
+}
+
+}  // namespace hc

@@ -193,3 +193,136 @@ TEST(Cli, ParsesAFullMeasurementCommandLine) {
   EXPECT_EQ(opts.threads, 4);
   EXPECT_EQ(opts.report_path, "/tmp/out.md");
 }
+
+// --- Task 11: the injection flags ----------------------------------------
+//
+// These are the flags that decide whether the program touches the user's
+// desktop, so the parser is the place a mistake has to be caught: a typo that
+// silently falls back to injecting is the one failure mode worth a test each.
+
+// --no-inject is the DEFAULT. Development happens on the same desktop this
+// program would seize, and a build that grabs the cursor the moment it starts
+// is hostile to the person writing it.
+TEST(Cli, DefaultsToNoInjection) {
+  const CliOptions opts = ParseOk({});
+  EXPECT_EQ(opts.sink, hc::SinkKind::Null);
+  EXPECT_FALSE(opts.no_inject) << "the flag was not given";
+  EXPECT_EQ(hc::ResolveSink(opts), hc::SinkKind::Null);
+}
+
+TEST(Cli, ParsesEachSinkName) {
+  EXPECT_EQ(ParseOk({"--sink", "null"}).sink, hc::SinkKind::Null);
+  EXPECT_EQ(ParseOk({"--sink", "log"}).sink, hc::SinkKind::Log);
+  EXPECT_EQ(ParseOk({"--sink", "xtest"}).sink, hc::SinkKind::XTest);
+}
+
+TEST(Cli, RejectsAnUnknownSinkNamingIt) {
+  const std::string error = ParseErr({"--sink", "wayland"});
+  EXPECT_TRUE(Mentions(error, "wayland")) << error;
+  EXPECT_TRUE(Mentions(error, "--sink")) << error;
+}
+
+// Order-independent on purpose: --no-inject is a safety override, and a
+// safety override that depends on where it sits on the command line is not
+// one.
+TEST(Cli, NoInjectOverridesAnExplicitSink) {
+  const CliOptions after = ParseOk({"--sink", "xtest", "--no-inject"});
+  EXPECT_EQ(after.sink, hc::SinkKind::XTest) << "what was asked for is kept";
+  EXPECT_TRUE(after.no_inject);
+  EXPECT_EQ(hc::ResolveSink(after), hc::SinkKind::Null) << "what is used";
+
+  const CliOptions before = ParseOk({"--no-inject", "--sink", "xtest"});
+  EXPECT_EQ(hc::ResolveSink(before), hc::SinkKind::Null);
+}
+
+TEST(Cli, SensitivityAndSmoothingAreAbsentUntilGiven) {
+  const CliOptions opts = ParseOk({});
+  EXPECT_FALSE(opts.has_sensitivity);
+  EXPECT_FALSE(opts.has_smoothing);
+}
+
+TEST(Cli, ParsesSensitivityAndSmoothing) {
+  const CliOptions opts = ParseOk({"--sensitivity", "3.5", "--smoothing", "0"});
+  EXPECT_TRUE(opts.has_sensitivity);
+  EXPECT_FLOAT_EQ(opts.sensitivity, 3.5f);
+  EXPECT_TRUE(opts.has_smoothing);
+  EXPECT_FLOAT_EQ(opts.smoothing, 0.0f);
+}
+
+// The same ranges ParseBindings enforces on `set sensitivity` and
+// `set smoothing`. Two paths to one setting must not disagree about what is
+// valid, or a value accepted on the command line would be rejected the moment
+// the bindings UI saved it.
+TEST(Cli, RejectsNonPositiveSensitivity) {
+  EXPECT_TRUE(Mentions(ParseErr({"--sensitivity", "0"}), "--sensitivity"));
+  EXPECT_TRUE(Mentions(ParseErr({"--sensitivity", "-1.5"}), "--sensitivity"));
+}
+
+TEST(Cli, RejectsNonNumericSensitivity) {
+  const std::string error = ParseErr({"--sensitivity", "fast"});
+  EXPECT_TRUE(Mentions(error, "fast")) << error;
+}
+
+TEST(Cli, RejectsSmoothingOutsideZeroToOne) {
+  EXPECT_TRUE(Mentions(ParseErr({"--smoothing", "1.5"}), "--smoothing"));
+  EXPECT_TRUE(Mentions(ParseErr({"--smoothing", "-0.1"}), "--smoothing"));
+}
+
+// nan and inf parse as floating point and would otherwise sail through every
+// range check: nan compares false against everything, inf passes "> 0".
+TEST(Cli, RejectsNonFiniteNumbers) {
+  EXPECT_FALSE(ParseErr({"--sensitivity", "nan"}).empty());
+  EXPECT_FALSE(ParseErr({"--sensitivity", "inf"}).empty());
+  EXPECT_FALSE(ParseErr({"--smoothing", "nan"}).empty());
+}
+
+TEST(Cli, ParsesTheBindingsPathVerbatim) {
+  EXPECT_EQ(ParseOk({"--bindings", "/etc/hc/b.txt"}).bindings_path,
+            "/etc/hc/b.txt");
+  EXPECT_TRUE(ParseOk({}).bindings_path.empty())
+      << "absent means the compiled-in default, not a path to look for";
+}
+
+// A configuration error the user cannot locate is a configuration that
+// failed, so the message names the path rather than saying "could not read
+// the bindings".
+TEST(Cli, ReadTextFileNamesAMissingPath) {
+  std::string text;
+  std::string error;
+  EXPECT_FALSE(hc::ReadTextFile("/nonexistent/hand-controller/bindings.txt",
+                                text, error));
+  EXPECT_TRUE(Mentions(error, "/nonexistent/hand-controller/bindings.txt"))
+      << error;
+}
+
+TEST(Cli, ReadTextFileReadsAFileItCanOpen) {
+  std::string text;
+  std::string error;
+  // The shipped configuration, whose path the build injects into this test.
+  ASSERT_TRUE(hc::ReadTextFile(HC_DEFAULT_BINDINGS_PATH, text, error)) << error;
+  EXPECT_TRUE(error.empty());
+  EXPECT_NE(text.find("set sensitivity"), std::string::npos);
+}
+
+// sendinput is accepted by the parser on every platform, and refused by
+// main() on the ones it cannot run on. Parsing and availability are different
+// questions, and conflating them would make a command line that is valid on
+// Windows a syntax error elsewhere.
+TEST(Cli, ParsesTheWindowsSinkNameEverywhere) {
+  EXPECT_EQ(ParseOk({"--sink", "sendinput"}).sink, hc::SinkKind::SendInput);
+  EXPECT_STREQ(hc::SinkKindName(hc::SinkKind::SendInput), "sendinput");
+}
+
+TEST(Cli, NoInjectOverridesTheWindowsSinkToo) {
+  const CliOptions opts = ParseOk({"--sink", "sendinput", "--no-inject"});
+  EXPECT_EQ(hc::ResolveSink(opts), hc::SinkKind::Null);
+}
+
+// Every name the parser accepts must round-trip through SinkKindName, or the
+// startup line could report a sink the user never asked for.
+TEST(Cli, EverySinkNameRoundTrips) {
+  for (const char* name : {"null", "log", "xtest", "sendinput"}) {
+    const CliOptions opts = ParseOk({"--sink", name});
+    EXPECT_STREQ(hc::SinkKindName(opts.sink), name);
+  }
+}

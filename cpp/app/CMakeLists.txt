@@ -1,34 +1,49 @@
-# The app layer: everything that is allowed to know about OpenCV. Only built
-# when HC_BUILD_APP is ON (the parent guards this add_subdirectory).
-#
-# hc_app is a library rather than going straight into an executable so the
-# test suite can link the same code the application runs. main.cpp is kept
-# OUT of it: a library carrying a main() cannot be linked into a test binary
-# that has its own.
-add_library(hc_app STATIC
-  src/opencv_frame_source.cpp
-  src/overlay.cpp
-  src/cli.cpp
-)
+# The application: argument parsing plus main(). Everything platform-specific
+# lives in ../platform, and everything portable below that in ../base,
+# ../vision.
 
-# PUBLIC: test and app targets that link hc_app include its headers by plain
-# name (e.g. "opencv_frame_source.hpp").
-target_include_directories(hc_app PUBLIC
+# hc_cli — the command-line parser.
+#
+# A library rather than part of the executable so the tests can link the same
+# code the application runs; main.cpp is kept OUT of it, because a library
+# carrying a main() cannot be linked into a test binary that has its own.
+#
+# It links nothing. ParseCli touches only <string> and friends, which is why
+# its test runs in the core-only configure with no OpenCV present -- see the
+# unguarded hc_add_test(test_cli ...) in ../tests/CMakeLists.txt.
+add_library(hc_cli STATIC src/cli.cpp)
+
+target_include_directories(hc_cli PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-# hc_core is PUBLIC because hc_app's own headers expose core types in their
-# signatures (IFrameSource, Frame, ImageView). hc::opencv likewise, since
-# cv::VideoCapture and cv::Mat appear as members of OpenCvFrameSource.
-#
-# This is the one target in the project allowed to do this; hc_core itself is
-# checked by hc_assert_no_forbidden_deps and must stay OpenCV-free.
-target_link_libraries(hc_app PUBLIC hc_core hc::opencv)
+# Portable, and asserted to stay that way: parsing "--camera 0" has no
+# business knowing which operating system it is on.
+hc_assert_no_forbidden_deps(hc_cli)
+hc_assert_does_not_link(hc_cli FORBIDDEN
+  hc_base hc_vision hc_vision_ort hc_control hc_platform hand_controller
+)
 
-# The executable. Only main.cpp: everything else it needs is in hc_app,
-# which is the same code the tests link.
+# The executable needs the platform layer, so it only exists when that layer
+# was built. hc_cli above is unguarded on purpose: it is portable, and its
+# tests should run in the fast core-only configure.
+if(NOT HC_BUILD_APP)
+  return()
+endif()
+
+# Only main.cpp: this is the one place in the project that knows about every
+# layer at once, because wiring them together is precisely what it is for.
+#
+# hc_vision_ort appears here rather than in hc_platform because choosing the
+# inference backend is an application decision. Swapping it for a different
+# IHandTracker implementation is a change to this line.
 add_executable(hand_controller src/main.cpp)
-target_link_libraries(hand_controller PRIVATE hc_app)
+target_link_libraries(hand_controller PRIVATE
+  hc_cli
+  hc_control
+  hc_platform
+  hc_vision_ort
+)
 
 # The model paths are injected the same way the tracker tests get them --
 # absolute, fetch-time paths from cmake/FetchModels.cmake -- rather than

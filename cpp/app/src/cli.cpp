@@ -2,8 +2,11 @@
 
 #include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 namespace hc {
@@ -51,7 +54,64 @@ bool ParseGeometry(const std::string& text, int& width, int& height) {
   return true;
 }
 
+// Parses a complete string as a finite float.
+//
+// nan and inf are REJECTED here rather than at each range check, because they
+// defeat those checks silently: nan compares false against every bound, so
+// "if (v <= 0) reject" lets it through, and inf satisfies "> 0".
+bool ParseFiniteFloat(const std::string& text, float& out) {
+  if (text.empty()) return false;
+
+  errno = 0;
+  char* end = nullptr;
+  const double value = std::strtod(text.c_str(), &end);
+
+  if (errno == ERANGE) return false;
+  if (end != text.c_str() + text.size()) return false;  // Trailing garbage.
+  if (!std::isfinite(value)) return false;
+
+  out = static_cast<float>(value);
+  return true;
+}
+
 }  // namespace
+
+const char* SinkKindName(SinkKind sink) {
+  switch (sink) {
+    case SinkKind::Null: return "null";
+    case SinkKind::Log: return "log";
+    case SinkKind::Uinput: return "uinput";
+    case SinkKind::XTest: return "xtest";
+    case SinkKind::SendInput: return "sendinput";
+  }
+  return "null";
+}
+
+SinkKind ResolveSink(const CliOptions& opts) {
+  return opts.no_inject ? SinkKind::Null : opts.sink;
+}
+
+bool ReadTextFile(const std::string& path, std::string& out,
+                  std::string& error) {
+  out.clear();
+  error.clear();
+
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    error = "could not open " + path;
+    return false;
+  }
+
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  if (file.bad()) {
+    error = "could not read " + path;
+    return false;
+  }
+
+  out = buffer.str();
+  return true;
+}
 
 std::string CliUsage() {
   return
@@ -66,6 +126,21 @@ std::string CliUsage() {
       "    --max-hands N     hands to track, 1..32 (default: 2)\n"
       "    --frames N        stop after N frames, 0 = until quit (default: 0)\n"
       "    --threads N       ONNX Runtime intra-op threads (default: 1)\n"
+      "\n"
+      "  Gestures and output:\n"
+      "    --bindings PATH   gesture bindings file (default: compiled-in)\n"
+      "    --sensitivity F   cursor speed multiplier, > 0 (overrides the file)\n"
+      "    --smoothing F     cursor smoothing, 0..1 (overrides the file)\n"
+      "    --sink NAME       null | log | uinput | xtest | sendinput\n"
+      "                      (default: null)\n"
+      "    --no-inject       force the null sink, whatever --sink says\n"
+      "\n"
+      "  The default sink is null: nothing is injected unless you ask.\n"
+      "  --sink uinput is the one that works on Linux, Wayland included: it\n"
+      "  creates a virtual input device in the kernel. It needs one-time\n"
+      "  access to /dev/uinput, and says how if it does not have it.\n"
+      "  --sink xtest is X11 only and silently does nothing under Wayland.\n"
+      "  --sink sendinput is Windows only and has never been run by anyone.\n"
       "\n"
       "  Output:\n"
       "    --headless        no preview window\n"
@@ -88,7 +163,8 @@ bool ParseCli(int argc, char** argv, CliOptions& out, std::string& error) {
     // --headless and --help are the only flags that take no value; every
     // other branch below needs one, so the bounds check is shared here
     // rather than repeated (and forgotten) in each branch.
-    const bool wants_value = (flag != "--headless" && flag != "--help");
+    const bool wants_value = (flag != "--headless" && flag != "--help" &&
+                              flag != "--no-inject");
     std::string value;
     if (wants_value) {
       if (i + 1 >= argc) {
@@ -145,6 +221,45 @@ bool ParseCli(int argc, char** argv, CliOptions& out, std::string& error) {
       }
     } else if (flag == "--report") {
       opts.report_path = value;
+    } else if (flag == "--bindings") {
+      // Stored verbatim and not opened here: whether the file exists is not a
+      // question about the command line, and ParseCli does no I/O. main()
+      // reads it through ReadTextFile and reports the path.
+      opts.bindings_path = value;
+    } else if (flag == "--sink") {
+      if (value == "null") {
+        opts.sink = SinkKind::Null;
+      } else if (value == "log") {
+        opts.sink = SinkKind::Log;
+      } else if (value == "uinput") {
+        opts.sink = SinkKind::Uinput;
+      } else if (value == "xtest") {
+        opts.sink = SinkKind::XTest;
+      } else if (value == "sendinput") {
+        opts.sink = SinkKind::SendInput;
+      } else {
+        error = "--sink must be null, log, uinput, xtest or sendinput, got \"" +
+                value + "\"";
+        return false;
+      }
+    } else if (flag == "--no-inject") {
+      opts.no_inject = true;
+    } else if (flag == "--sensitivity") {
+      if (!ParseFiniteFloat(value, opts.sensitivity) ||
+          !(opts.sensitivity > 0.0f)) {
+        error = "--sensitivity needs a finite number above 0, got \"" + value +
+                "\"";
+        return false;
+      }
+      opts.has_sensitivity = true;
+    } else if (flag == "--smoothing") {
+      if (!ParseFiniteFloat(value, opts.smoothing) || opts.smoothing < 0.0f ||
+          opts.smoothing > 1.0f) {
+        error = "--smoothing needs a finite number in 0..1, got \"" + value +
+                "\"";
+        return false;
+      }
+      opts.has_smoothing = true;
     } else if (flag == "--headless") {
       opts.want_overlay = false;
     } else if (flag == "--help") {

@@ -23,20 +23,50 @@ function(hc_add_test name)
   gtest_discover_tests(${name})
 endfunction()
 
-hc_add_test(test_geometry test_geometry.cpp LIBS hc_core)
-hc_add_test(test_metrics test_metrics.cpp LIBS hc_core)
-hc_add_test(test_warp test_warp.cpp LIBS hc_core)
-hc_add_test(test_anchors test_anchors.cpp LIBS hc_core)
-hc_add_test(test_palm_decode test_palm_decode.cpp LIBS hc_core)
-hc_add_test(test_roi test_roi.cpp LIBS hc_core)
-hc_add_test(test_association test_association.cpp LIBS hc_core)
-hc_add_test(test_frame_source test_frame_source.cpp LIBS hc_core)
+# Every test links the NARROWEST target that satisfies it, never a convenient
+# superset. That is what makes the module split verifiable rather than
+# decorative: if a unit quietly grows a dependency on a higher layer, its own
+# test stops linking, and it does so here rather than in a code review.
 
-# Phase 2. Pure core: no OpenCV, no OS, so these build and run with
-# -DHC_BUILD_APP=OFF like everything else in hc_core.
-hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_core)
+# hc_base — the primitives. These link no inference runtime at all.
+hc_add_test(test_geometry test_geometry.cpp LIBS hc_base)
+hc_add_test(test_metrics test_metrics.cpp LIBS hc_base)
+hc_add_test(test_frame_source test_frame_source.cpp LIBS hc_base)
 
-hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_core)
+# hc_vision — the detection algorithms. Linking these against hc_vision
+# rather than hc_vision_ort is the standing proof that they need no ONNX
+# Runtime, which is the precondition for the WebAssembly port.
+hc_add_test(test_warp test_warp.cpp LIBS hc_vision)
+hc_add_test(test_anchors test_anchors.cpp LIBS hc_vision)
+hc_add_test(test_palm_decode test_palm_decode.cpp LIBS hc_vision)
+hc_add_test(test_roi test_roi.cpp LIBS hc_vision)
+hc_add_test(test_association test_association.cpp LIBS hc_vision)
+hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_vision)
+
+# hc_control — the logic layer. These tests drive synthetic landmark poses
+# through the state machine, so they need no camera, no display and no model.
+hc_add_test(test_gesture_recognizer test_gesture_recognizer.cpp LIBS hc_control)
+
+hc_add_test(test_bindings test_bindings.cpp LIBS hc_control)
+# The path is injected rather than hardcoded so the test can check that the
+# text CMake compiled into hc_control is still the text in the shipped file.
+target_compile_definitions(test_bindings PRIVATE
+  HC_DEFAULT_BINDINGS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt"
+)
+
+hc_add_test(test_action_mapper test_action_mapper.cpp LIBS hc_control)
+hc_add_test(test_output_sink test_output_sink.cpp LIBS hc_control)
+hc_add_test(test_queued_sink test_queued_sink.cpp LIBS hc_control)
+
+# The whole chain joined up -- frame source, tracker, recognizer, mapper,
+# sink -- driven through a SCRIPTED tracker, so it needs no model, no camera
+# and no display, and a failure names the wiring rather than the inference.
+hc_add_test(test_controller test_controller.cpp LIBS hc_control)
+target_include_directories(test_controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# hc_vision_ort — the ONNX Runtime backend, and the only tests that load
+# real model files.
+hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)
 # The tracker tests are the only ones that touch real model files and the
 # committed image fixture, so the paths are injected here rather than being
 # hardcoded in the test source. HC_PALM_MODEL / HC_LANDMARK_MODEL are the
@@ -51,7 +81,7 @@ target_include_directories(test_hand_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 # Task 10's two-hand tests need exactly the same injected paths: the same
 # models, and the same committed fixture (which they composite into
 # multi-hand frames via fixture_image.hpp).
-hc_add_test(test_hand_tracker_two test_hand_tracker_two.cpp LIBS hc_core)
+hc_add_test(test_hand_tracker_two test_hand_tracker_two.cpp LIBS hc_vision_ort)
 target_compile_definitions(test_hand_tracker_two PRIVATE
   HC_PALM_MODEL_PATH="${HC_PALM_MODEL}"
   HC_LANDMARK_MODEL_PATH="${HC_LANDMARK_MODEL}"
@@ -59,7 +89,22 @@ target_compile_definitions(test_hand_tracker_two PRIVATE
 )
 target_include_directories(test_hand_tracker_two PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Tests for the app layer. Guarded, because the app layer and OpenCV only
+# hc_cli — argument parsing only, and deliberately OUTSIDE the HC_BUILD_APP
+# guard below. ParseCli links nothing but the standard library, so there is no
+# reason its tests should wait on an OpenCV build; they run in the core-only
+# configure with the rest of the portable code.
+#
+# main() itself is not linked here -- ParseCli lives in its own translation
+# unit precisely so the tests can reach it without pulling in a second main().
+hc_add_test(test_cli test_cli.cpp LIBS hc_cli)
+# ReadTextFile needs a file it can actually open; the shipped configuration is
+# the one file guaranteed to be there, and its path comes from the build rather
+# than from a guess about the working directory.
+target_compile_definitions(test_cli PRIVATE
+  HC_DEFAULT_BINDINGS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt"
+)
+
+# Tests for the platform layer. Guarded, because hc_platform and OpenCV only
 # exist when HC_BUILD_APP is ON; with it OFF this whole block is skipped and
 # the suite stays buildable with no OpenCV anywhere.
 if(HC_BUILD_APP)
@@ -68,17 +113,31 @@ if(HC_BUILD_APP)
   set(HC_TEST_TMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp")
   file(MAKE_DIRECTORY "${HC_TEST_TMP_DIR}")
 
-  hc_add_test(test_opencv_frame_source test_opencv_frame_source.cpp LIBS hc_app)
+  hc_add_test(test_opencv_frame_source test_opencv_frame_source.cpp LIBS hc_platform)
   target_compile_definitions(test_opencv_frame_source PRIVATE
     HC_TEST_TMP_DIR="${HC_TEST_TMP_DIR}"
   )
 
   # Only DrawObservations is covered. Overlay::Render needs a display and is
   # exercised by Task 14's manual run instead.
-  hc_add_test(test_overlay test_overlay.cpp LIBS hc_app)
+  hc_add_test(test_overlay test_overlay.cpp LIBS hc_platform)
 
-  # Argument parsing only. main() itself is not linked here -- ParseCli lives
-  # in its own translation unit precisely so the tests can reach it without
-  # pulling in a second main().
-  hc_add_test(test_cli test_cli.cpp LIBS hc_app)
+  # The C ABI, exercised THROUGH the C header only -- if a case here needs a
+  # C++ type from the project, the ABI has a hole. Links the shared library
+  # the GUI loads, so a symbol hidden by the visibility settings fails here
+  # rather than in Dart.
+  hc_add_test(test_ffi test_ffi.cpp LIBS hc_ffi)
+
+  # The uinput sink, Linux only. Every case here reads the virtual device's
+  # own evdev node back, so these are measurements rather than assertions that
+  # a write returned -- the distinction XTest's silent failure taught.
+  #
+  # They SKIP when /dev/uinput is not accessible, which is the default on a
+  # fresh machine. A skipped run means UNVERIFIED, not passed; to run them for
+  # real after granting access:
+  #
+  #   sudo -u "$USER" -g input ./cpp/build-app/bin/test_uinput_sink
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    hc_add_test(test_uinput_sink test_uinput_sink.cpp LIBS hc_platform)
+  endif()
 endif()
