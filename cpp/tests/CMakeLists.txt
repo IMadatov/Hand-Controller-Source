@@ -43,6 +43,10 @@ hc_add_test(test_roi test_roi.cpp LIBS hc_vision)
 hc_add_test(test_association test_association.cpp LIBS hc_vision)
 hc_add_test(test_hand_features test_hand_features.cpp LIBS hc_vision)
 
+# hc_control — the logic layer. These tests drive synthetic landmark poses
+# through the state machine, so they need no camera, no display and no model.
+hc_add_test(test_gesture_recognizer test_gesture_recognizer.cpp LIBS hc_control)
+
 # hc_vision_ort — the ONNX Runtime backend, and the only tests that load
 # real model files.
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)

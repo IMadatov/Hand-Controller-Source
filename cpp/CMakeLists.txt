@@ -35,11 +35,12 @@ add_subdirectory(tools)
 #                           palm decode, ROI, warp, association, features.
 #            hc_vision_ort  its ONNX Runtime backend, the only ORT consumer.
 #
-# control/ (hc_control: gesture recognition and mapping) arrives with the
-# phase 2 gesture tasks. It is deliberately not declared yet -- an empty
-# static library is a placeholder pretending to be a boundary.
+#   control/ hc_control    the logic layer: gesture recognition, commands,
+#                          bindings, mapping. Portable, and the only place
+#                          those decisions are made.
 add_subdirectory(base)
 add_subdirectory(vision)
+add_subdirectory(control)
 
 # platform/ is the per-system layer and the only one that links OpenCV, so it
 # is guarded: a core-only configure (-DHC_BUILD_APP=OFF) builds no OpenCV and

@@ -268,6 +268,34 @@ TEST(GestureRecognizer, TimestampsArePassedThroughNotRead) {
 - [ ] **Step 4: Run and verify they pass.** Then re-run under ASan — see `hand-controller-cpp-asan-recipe`: use **g++**, not clang.
 - [ ] **Step 5: Commit** — `feat: per-hand gesture state machine with latches and hysteresis`
 
+### NOT DONE in Task 3: the thumb splay threshold is still uncalibrated
+
+`vision/src/hand_features.cpp` carries a comment asking Task 3 to tune its
+`thumb_splay > 0.9f` test "against recorded landmark sequences, where the
+gesture thresholds are being set anyway, and move it into GestureConfig if the
+right value turns out to depend on the user."
+
+**Task 3 did not do this, and could not.** There is no camera on this machine
+and no recorded landmark sequences exist in the repository. Tuning it would
+have meant replacing one guess with another and calling the second one
+measured. It remains hardcoded at 0.9.
+
+What this costs: the thumb is an input to four of the six gestures
+(`OpenPalm`, `Fist`, `ThumbUp`, `PointIndex` target patterns all read
+`extended[0]`), so a wrong threshold does not fail loudly — it makes those
+gestures unreliable for a particular user's hand while the tests, which use
+synthetic poses with wide margins, keep passing.
+
+The threshold also cannot move into `GestureConfig` as the comment suggests:
+`ComputeFeatures` is in `hc_vision`, `GestureConfig` is in `hc_control`, and
+the dependency direction forbids the former from seeing the latter. Moving it
+means either a parameter on `ComputeFeatures` or a small `FeatureConfig` in
+`hc_vision`. **Fold this into Task 5**, which is where user-supplied
+configuration and its validation arrive; a threshold that is only tunable by
+recompiling is exactly the thing Task 5 exists to remove.
+
+---
+
 ---
 
 ## Task 4: Abstract commands
