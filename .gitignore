@@ -5,3 +5,6 @@ dist
 build
 build-asan
 cpp/build*/
+Design
+.claude
+.vscode
