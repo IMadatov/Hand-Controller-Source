@@ -21,3 +21,13 @@ if(UNIX AND NOT APPLE)
   add_executable(xtest_probe xtest_probe.cpp)
   target_link_libraries(xtest_probe PRIVATE ${CMAKE_DL_LIBS})
 endif()
+
+# dump_contract — emits the vocabulary, the shipped configuration, the
+# validation rules and a real sample session as JSON, for the UI layer.
+#
+# Generated from hc_control rather than transcribed from it, so a UI built
+# against this output cannot be mocking a shape that does not exist. Links
+# hc_control only: no OpenCV, no inference runtime, so it builds in the fast
+# core-only configure.
+add_executable(dump_contract dump_contract.cpp)
+target_link_libraries(dump_contract PRIVATE hc_control)
