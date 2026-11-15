@@ -102,6 +102,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Widget> _cameraSection(AppSettings settings) => [
         _Section(
           title: 'Camera',
+          // These are frame-source arguments the engine is constructed
+          // with, not configuration it stores. They take effect on the next
+          // start and are not written anywhere.
+          note: 'Applied when tracking starts. Not stored.',
           children: [
             _Field(
               label: 'Device',
@@ -190,17 +194,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: 'Scroll',
         children: [
           _Field(
-            label: 'Scroll sensitivity',
-            help: 'Separate from the cursor: a comfortable pointer speed and '
-                'a comfortable scroll speed are not the same number.',
-            child: _Slider(
-              value: settings.scrollSensitivity,
-              min: 0.2,
-              max: 4,
-              suffix: 'x',
-              onChanged: (v) =>
-                  settings.update(() => settings.scrollSensitivity = v),
-            ),
+            label: 'Scroll speed',
+            // There is deliberately no slider here. `scroll` shares
+            // `sensitivity` and the same jitter filter as the cursor in
+            // hc_control, so a second slider would imply an independence
+            // that does not exist and would silently do nothing. Giving
+            // scroll its own scale means a new `set` key in the bindings
+            // grammar, parser included — an engine change, not a GUI one.
+            help: 'Scroll uses the cursor sensitivity above. The engine '
+                'applies one scale and one jitter filter to both, so there '
+                'is nothing separate to set.',
+            child: const SizedBox.shrink(),
           ),
         ],
       ),
@@ -210,6 +214,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Widget> _detectionSection(AppSettings settings) => [
         _Section(
           title: 'Detection',
+          note: 'Applied when tracking starts. Not stored.',
           children: [
             _Field(
               label: 'Threshold',

@@ -59,10 +59,17 @@ class MockEngine implements HandControllerEngine {
   var _bindings = mockDefaultBindings();
   bool _injectRequested = false;
 
-  /// The pose each track held on the previous frame, so transitions can be
-  /// derived rather than scripted. Keyed by track id, as the C++ recognizer
-  /// keys its latches.
-  final _previousGesture = <int, GestureKind>{};
+  /// The gesture each track has BEGUN and not yet ended.
+  ///
+  /// Keyed by track id, as the C++ recognizer keys its latches — not by
+  /// handedness, which can flip mid-track.
+  final _activeGesture = <int, GestureKind>{};
+
+  /// A pose seen this frame whose `began` fires on the NEXT one.
+  ///
+  /// The real recognizer never emits `ended` and `began` together; see
+  /// `_transitions`.
+  final _pendingBegan = <int, GestureKind>{};
 
   /// The handedness latched when the current gesture began. The label can
   /// flip mid-track; the binding must not follow it.
@@ -107,7 +114,8 @@ class MockEngine implements HandControllerEngine {
 
     _injectRequested = injectInput;
     _frame = 0;
-    _previousGesture.clear();
+    _activeGesture.clear();
+    _pendingBegan.clear();
     _latchedHandedness.clear();
     _previousCenter.clear();
 
@@ -124,6 +132,7 @@ class MockEngine implements HandControllerEngine {
   Future<void> stop() async {
     _timer?.cancel();
     _timer = null;
+    _releaseAll();
     _state.value = _state.value.copyWith(
       lifecycle: EngineLifecycle.stopped,
       sink: SinkStatus.observeOnly,
@@ -134,9 +143,40 @@ class MockEngine implements HandControllerEngine {
   @override
   Future<void> setPaused(bool paused) async {
     if (!_state.value.lifecycle.isLive) return;
+
+    // Pausing releases too. A key held across a pause is the same stuck key
+    // as one held across a shutdown, and "paused" is exactly when the user
+    // has stopped paying attention to what their hands are doing.
+    if (paused) _releaseAll();
+
     _state.value = _state.value.copyWith(
       lifecycle: paused ? EngineLifecycle.paused : EngineLifecycle.running,
     );
+  }
+
+  /// Ends every gesture in flight, so nothing is left held.
+  ///
+  /// The plan requires this on EVERY exit path, and the reason is the worst
+  /// failure this project can produce: a modifier key still down after the
+  /// app has stopped, with no running process left to release it. Dispatched
+  /// even while paused, because a pause is one of the paths.
+  void _releaseAll() {
+    for (final trackId in _activeGesture.keys.toList()) {
+      final held = _activeGesture.remove(trackId)!;
+      final handedness =
+          _latchedHandedness.remove(trackId) ?? Handedness.unknown;
+
+      _dispatch(GestureEvent(
+        trackId: trackId,
+        handedness: handedness,
+        kind: held,
+        phase: GesturePhase.ended,
+        position: _previousCenter[trackId] ?? (x: 0.0, y: 0.0),
+        delta: (x: 0.0, y: 0.0),
+        timestampUs: _frame * frameInterval.inMicroseconds,
+      ));
+    }
+    _pendingBegan.clear();
   }
 
   @override
@@ -331,12 +371,13 @@ class MockEngine implements HandControllerEngine {
     // A track that disappeared gets an `ended` for whatever it was holding.
     // Without this the key stays down forever, which is the failure this
     // whole branch of the design exists to prevent.
-    for (final trackId in _previousGesture.keys.toList()) {
+    for (final trackId in _activeGesture.keys.toList()) {
       if (live.contains(trackId)) continue;
-      final held = _previousGesture.remove(trackId)!;
+      final held = _activeGesture.remove(trackId)!;
       final handedness =
           _latchedHandedness.remove(trackId) ?? Handedness.unknown;
       _previousCenter.remove(trackId);
+      _pendingBegan.remove(trackId);
       if (held == GestureKind.none) continue;
       events.add(GestureEvent(
         trackId: trackId,
@@ -347,6 +388,11 @@ class MockEngine implements HandControllerEngine {
         delta: (x: 0.0, y: 0.0),
         timestampUs: _frame * frameInterval.inMicroseconds,
       ));
+    }
+    for (final trackId in _pendingBegan.keys.toList()) {
+      // Never began, so nothing to end — but the deferral must not outlive
+      // the track, or it would fire against a hand that is gone.
+      if (!live.contains(trackId)) _pendingBegan.remove(trackId);
     }
 
     _frames.add(EngineFrame(
@@ -379,9 +425,6 @@ class MockEngine implements HandControllerEngine {
     required NormPoint position,
     required NormPoint delta,
   }) {
-    final previous = _previousGesture[trackId] ?? GestureKind.none;
-    _previousGesture[trackId] = gesture;
-
     final out = <GestureEvent>[];
     final timestampUs = _frame * frameInterval.inMicroseconds;
 
@@ -396,24 +439,58 @@ class MockEngine implements HandControllerEngine {
           timestampUs: timestampUs,
         );
 
-    if (gesture == previous) {
-      if (gesture != GestureKind.none) {
+    final active = _activeGesture[trackId];
+
+    if (active != null) {
+      if (gesture == active) {
         // Held events carry the LATCHED label, not this frame's.
-        out.add(make(gesture, GesturePhase.held,
+        out.add(make(active, GesturePhase.held,
             _latchedHandedness[trackId] ?? handedness));
+        return out;
+      }
+
+      out.add(make(active, GesturePhase.ended,
+          _latchedHandedness[trackId] ?? handedness));
+      _activeGesture.remove(trackId);
+      _latchedHandedness.remove(trackId);
+
+    // THE `began` IS HELD BACK A FRAME, deliberately.
+    //
+    // The real recognizer never emits `ended` and `began` on the same frame.
+    // Five pairs in the vocabulary differ by one finger, so the exit
+    // threshold tolerates one finger of disagreement and a higher-scoring
+    // neighbour has to take over, confirmed over several frames. A release
+    // and an unrelated press arriving together would also let a key_release
+    // and a key_press dispatch out of order.
+    //
+    // So a UI reading "current gesture" off the event stream sees a short
+    // window holding nothing. That window is the truth, not a dropped frame,
+    // and the mock reproduces it rather than letting the GUI be written
+    // against a transition that does not exist.
+    //
+    // See docs/superpowers/specs/2026-11-15-gui-contract.md, section 2.
+      if (gesture != GestureKind.none) {
+        _pendingBegan[trackId] = gesture;
+      } else {
+        _pendingBegan.remove(trackId);
       }
       return out;
     }
 
-    if (previous != GestureKind.none) {
-      out.add(make(previous, GesturePhase.ended,
-          _latchedHandedness[trackId] ?? handedness));
-    }
-    if (gesture != GestureKind.none) {
+    // Nothing is active. A pose deferred last frame begins now, provided it
+    // is still the same pose.
+    final pending = _pendingBegan.remove(trackId);
+    if (pending != null && pending == gesture) {
+      _activeGesture[trackId] = gesture;
       _latchedHandedness[trackId] = handedness;
       out.add(make(gesture, GesturePhase.began, handedness));
-    } else {
-      _latchedHandedness.remove(trackId);
+      return out;
+    }
+
+    // Either nothing was pending, or the hand moved on before the deferred
+    // `began` landed — in which case nothing ever began, so nothing ends.
+    if (gesture != GestureKind.none) {
+      _pendingBegan[trackId] = gesture;
     }
     return out;
   }

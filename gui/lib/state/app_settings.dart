@@ -19,11 +19,6 @@ class AppSettings extends ChangeNotifier {
   /// How eager the detector is.
   DetectionThreshold threshold = DetectionThreshold.medium;
 
-  /// Multiplies scroll motion. Separate from cursor sensitivity because a
-  /// comfortable cursor speed and a comfortable scroll speed are not the
-  /// same number.
-  double scrollSensitivity = 1.2;
-
   /// Start tracking when the user logs in.
   bool launchAtStartup = false;
 
