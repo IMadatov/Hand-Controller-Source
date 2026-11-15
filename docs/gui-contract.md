@@ -7,6 +7,10 @@ Base: `hand-controller-cpp-phase2` @ `81c0d6d`
 Bu hujjat GUI sessiyasi uchun **yagona haqiqat manbai**. Engine (C++) tomoni
 parallel sessiyada rivojlanmoqda; bu yerdagi hech narsa `cpp/` ichiga tegmaydi.
 
+> **Rollar:** egasining qarori bilan **C++ ishi parallel sessiyada**
+> (`Hand-Controller-Source`, branch `hand-controller-cpp-phase2`), **GUI esa
+> shu worktree'da** quriladi. Oldingi tahrirdagi aksincha taqsimot bekor.
+
 ---
 
 ## 1. Stack qarori
@@ -18,9 +22,10 @@ chiqadi, va keyinchalik mobilga yo'l ochiq qoladi — bu phase 2 amendmentida
 yozilgan maqsadga mos (`extern "C"` shim bitta artefaktdan .NET P/Invoke,
 Flutter FFI va mobilni ochadi).
 
-> Diqqat: bu mashinada `flutter` ham `dart` ham **o'rnatilmagan**. Birinchi
-> qadam SDK o'rnatish. `cpp/` uchun amal qiladigan "clean clone + cmake
-> yetarli" qoidasi Flutter SDK'ga taalluqli emas — u alohida toolchain.
+Flutter **3.47.5 stable** shu mashinada mavjud: `~/development/flutter/bin`
+(PATH'da emas, qo'lda qo'shiladi). `flutter doctor` Linux desktop
+toolchain'ni ✓ deb tasdiqlaydi. `cpp/` uchun amal qiladigan "clean clone +
+cmake yetarli" qoidasi Flutter SDK'ga taalluqli emas — u alohida toolchain.
 
 ---
 
@@ -176,3 +181,52 @@ sink'ning **haqiqatan ishlayotganini** ko'rsatishi kerak, komanda yuborilgan
 faktini emas. Sink mavjud emasligini `Create()` xabar qiladi — GUI buni
 ko'rinadigan holat sifatida ko'rsatsin ("input injection unavailable"), jim
 yutmasin.
+
+---
+
+## 8. Holat, 2026-11-15 (GUI sessiyasi)
+
+Qurilgani (branch `hand-controller-gui`):
+
+| Qism | Fayl | Holat |
+|---|---|---|
+| Flutter Linux desktop, 1280×800 | `gui/` | ✅ |
+| Inter + Space Grotesk bundle | `gui/assets/fonts/` | ✅ |
+| Design tokenlari | `gui/lib/theme/` | ✅ |
+| Kontrakt ko'zgusi (wire nomlar) | `gui/lib/domain/` | ✅ |
+| `HandControllerEngine` + `MockEngine` | `gui/lib/engine/` | ✅ |
+| Live View | `gui/lib/screens/live_view.dart` | ✅ |
+| Commands & Bindings | `gui/lib/screens/bindings_screen.dart` | ✅ |
+| Settings, Diagnostics | `gui/lib/screens/` | ✅ |
+| Onboarding, Tray Overlay | — | ⏳ |
+| `FfiEngine` | — | ⛔ Task 11 ni kutadi |
+
+29 ta test o'tadi. Ekranlar `gui/test/goldens/*.png` ga render qilinadi
+(`flutter test --update-goldens test/screenshots_test.dart`) — bu mashinada
+Wayland va screenshot utiliti yo'qligi uchun ko'rish usuli shu.
+
+### Engine sessiyasiga uchta savol
+
+Bular GUI qurilishida chiqdi va **C++ tomonida qaror talab qiladi**:
+
+1. **O'chirilgan (disabled) binding'ni format ifodalay olmaydi.** Mockup'da
+   har satrda Enable tugmasi bor, lekin `default_bindings.txt` da "mavjud,
+   lekin o'chiq" degan holat yo'q. Hozir GUI uni saqlashda **o'chirib
+   yuboradi** va buni oldindan ogohlantiradi. Agar bu noto'g'ri bo'lsa,
+   formatga izoh bilan saqlash (`# disabled: ...`) yoki alohida bayroq
+   kerak — va u `SerializeBindings` ichida bo'lishi shart.
+
+2. **Settings'dagi hamma narsa `BindingSet` ichida emas.** `sensitivity` va
+   `smoothing` — ichida. Lekin resolution, detection threshold, scroll
+   sensitivity, panic hotkey — yo'q. Bular engine konfiguratsiyasimi
+   (`Controller` qabul qiladimi), yoki sof GUI preference'larimi? Hozir GUI
+   ularni o'zida saqlaydi va **hech qayerga yozmaydi**.
+
+3. **Sessiya hamon Wayland.** Phase 2 plani "egasi X11 ga o'tadi" deb
+   yozgan; `XDG_SESSION_TYPE=wayland` hali ham shunday. Task 9 ning
+   kursorni qaytarib o'qiydigan testi shu holatda **yiqilishi kerak** —
+   bu kutilgan natija, tuzatish uchun test emas.
+
+### FfiEngine kelganda o'zgaradigan yagona joy
+
+`gui/lib/main.dart` dagi `buildEngine()`. Boshqa hech narsa.
