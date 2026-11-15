@@ -1,0 +1,31 @@
+name: hand_controller_gui
+description: "Hand Controller — desktop frontend over the C++ hand-tracking engine."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Bundled rather than fetched at runtime: the app must render identically
+  # with no network, and neither face is installed on a stock Linux desktop.
+  # Both are variable fonts, so one file covers every weight the design uses.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter.ttf
+    - family: Space Grotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk.ttf
