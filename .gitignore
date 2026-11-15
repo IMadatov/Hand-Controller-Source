@@ -3,3 +3,8 @@ hand_controller_env
 output
 dist
 build
+build-asan
+cpp/build*/
+Design
+.claude
+.vscode
