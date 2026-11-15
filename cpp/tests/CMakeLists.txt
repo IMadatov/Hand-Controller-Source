@@ -54,6 +54,8 @@ target_compile_definitions(test_bindings PRIVATE
   HC_DEFAULT_BINDINGS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../config/default_bindings.txt"
 )
 
+hc_add_test(test_action_mapper test_action_mapper.cpp LIBS hc_control)
+
 # hc_vision_ort — the ONNX Runtime backend, and the only tests that load
 # real model files.
 hc_add_test(test_hand_tracker test_hand_tracker.cpp LIBS hc_vision_ort)

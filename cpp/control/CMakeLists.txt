@@ -15,6 +15,7 @@ add_library(hc_control STATIC
   src/gesture_recognizer.cpp
   src/command.cpp
   src/bindings.cpp
+  src/action_mapper.cpp
 )
 
 target_include_directories(hc_control PUBLIC
