@@ -477,8 +477,13 @@ TEST(GestureRecognizer, ReleasingAndRepeatingFiresAgain) {
 }
 
 // Spec defect 4: shared state kept firing for a hand that had left frame.
+//
+// Pinned to lost_grace_frames = 0, the immediate-Ended contract this test was
+// written for; the grace window has its own tests below.
 TEST(GestureRecognizer, LosingAHandEmitsEndedAndClearsState) {
-  GestureRecognizer r(GestureConfig::Default());
+  GestureConfig config = GestureConfig::Default();
+  config.lost_grace_frames = 0;
+  GestureRecognizer r(config);
   std::vector<GestureEvent> out;
 
   for (int i = 0; i < 5; ++i) r.Process({PinchAt(0.05f)}, 0, out);
@@ -762,4 +767,264 @@ TEST(GestureNames, EveryKindAndPhaseDescribesItself) {
           << text;
     }
   }
+}
+
+// --- miss tolerance and rejoin ----------------------------------------------
+
+TEST(GestureConfigTest, DefaultHasGraceAndRejoinDistance) {
+  const GestureConfig c = GestureConfig::Default();
+  EXPECT_EQ(c.lost_grace_frames, 3);
+  EXPECT_FLOAT_EQ(c.rejoin_max_distance, 1.0f);
+}
+
+TEST(GestureRecognizer, AbsentTrackIsSilentThroughGraceThenEnds) {
+  GestureRecognizer r(GestureConfig::Default());  // grace 3
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 4)}, 0, out);
+
+  for (int i = 0; i < 3; ++i) {
+    r.Process({}, 0, out);
+    EXPECT_TRUE(out.empty()) << "absent frame " << i;
+  }
+  r.Process({}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Ended);
+  EXPECT_EQ(out[0].kind, GestureKind::Pinch);
+  EXPECT_EQ(out[0].track_id, 4u);
+  EXPECT_EQ(out[0].handedness, Handedness::Right);
+  EXPECT_FLOAT_EQ(out[0].delta.x, 0.0f);
+  EXPECT_FLOAT_EQ(out[0].delta.y, 0.0f);
+
+  r.Process({}, 0, out);
+  EXPECT_TRUE(out.empty());
+}
+
+TEST(GestureRecognizer, ReturnWithinGraceContinuesWithoutASecondBegan) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+  const auto feed = [&](const std::vector<HandObservation>& hands) {
+    r.Process(hands, 0, out);
+    all.insert(all.end(), out.begin(), out.end());
+  };
+
+  for (int i = 0; i < 4; ++i) feed({PinchAt(0.05f, 1)});
+  feed({});
+  feed({});
+  feed({PinchAt(0.05f, 1)});
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Held);
+  for (int i = 0; i < 3; ++i) feed({PinchAt(0.05f, 1)});
+
+  EXPECT_EQ(CountPhase(all, Phase::Began), 1);
+  EXPECT_EQ(CountPhase(all, Phase::Ended), 0);
+}
+
+TEST(GestureRecognizer, ReturnFrameHasZeroDeltaThenMotionResumes) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1, {0.5f, 0.8f})}, 0, out);
+  r.Process({}, 0, out);
+
+  r.Process({PinchAt(0.05f, 1, {0.55f, 0.8f})}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Held);
+  EXPECT_FLOAT_EQ(out[0].delta.x, 0.0f);
+  EXPECT_FLOAT_EQ(out[0].delta.y, 0.0f);
+
+  r.Process({PinchAt(0.05f, 1, {0.56f, 0.8f})}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_NEAR(out[0].delta.x, 0.01f, 1e-5f);
+}
+
+TEST(GestureRecognizer, NewIdNearbyAdoptsTheLostTrack) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+  const auto feed = [&](const std::vector<HandObservation>& hands) {
+    r.Process(hands, 0, out);
+    all.insert(all.end(), out.begin(), out.end());
+  };
+
+  for (int i = 0; i < 4; ++i) feed({PinchAt(0.05f, 1, {0.5f, 0.8f})});
+  feed({});
+  feed({PinchAt(0.05f, 2, {0.52f, 0.8f})});
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Held);
+  EXPECT_EQ(out[0].track_id, 2u);  // The current observation's id.
+  EXPECT_FLOAT_EQ(out[0].delta.x, 0.0f);
+  for (int i = 0; i < 3; ++i) feed({PinchAt(0.05f, 2, {0.52f, 0.8f})});
+
+  EXPECT_EQ(CountPhase(all, Phase::Began), 1);
+  EXPECT_EQ(CountPhase(all, Phase::Ended), 0);
+
+  // The old id is gone for good: releasing the new one ends exactly once.
+  for (int i = 0; i < 4; ++i) feed({});
+  EXPECT_EQ(CountPhase(all, Phase::Ended), 1);
+  EXPECT_EQ(CountFor(all, 2, Phase::Ended), 1);
+}
+
+TEST(GestureRecognizer, RejoinPicksTheNearestAndAdoptsEachLostTrackOnce) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) {
+    r.Process({PinchAt(0.05f, 1, {0.3f, 0.8f}), PinchAt(0.05f, 2, {0.6f, 0.8f})},
+              0, out);
+  }
+  r.Process({}, 0, out);
+
+  // Two new ids, each beside one lost track. Neither may take both.
+  r.Process({PinchAt(0.05f, 11, {0.31f, 0.8f}),
+             PinchAt(0.05f, 12, {0.59f, 0.8f})},
+            0, out);
+  ASSERT_EQ(out.size(), 2u);
+  for (const GestureEvent& e : out) EXPECT_EQ(e.phase, Phase::Held);
+
+  // A third new hand has nothing left to adopt: it starts fresh.
+  r.Process({PinchAt(0.05f, 11, {0.31f, 0.8f}),
+             PinchAt(0.05f, 12, {0.59f, 0.8f}),
+             PinchAt(0.05f, 13, {0.45f, 0.8f})},
+            0, out);
+  EXPECT_EQ(CountFor(out, 13, Phase::Began), 1);
+}
+
+TEST(GestureRecognizer, NoRejoinBeyondRejoinMaxDistance) {
+  GestureRecognizer r(GestureConfig::Default());  // 1.0 palm-size
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+  const auto feed = [&](const std::vector<HandObservation>& hands) {
+    r.Process(hands, 0, out);
+    all.insert(all.end(), out.begin(), out.end());
+  };
+
+  for (int i = 0; i < 4; ++i) feed({PinchAt(0.05f, 1, {0.3f, 0.8f})});
+  feed({});
+  // 0.2 away is about two palm-sizes.
+  feed({PinchAt(0.05f, 2, {0.5f, 0.8f})});
+  EXPECT_EQ(CountFor(all, 2, Phase::Began), 1);
+
+  // The unadopted track still ends on schedule.
+  for (int i = 0; i < 3; ++i) feed({PinchAt(0.05f, 2, {0.5f, 0.8f})});
+  EXPECT_EQ(CountFor(all, 1, Phase::Ended), 1);
+}
+
+TEST(GestureRecognizer, NoRejoinAfterGraceExpired) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> all;
+  std::vector<GestureEvent> out;
+  const auto feed = [&](const std::vector<HandObservation>& hands) {
+    r.Process(hands, 0, out);
+    all.insert(all.end(), out.begin(), out.end());
+  };
+
+  for (int i = 0; i < 4; ++i) feed({PinchAt(0.05f, 1)});
+  for (int i = 0; i < 4; ++i) feed({});  // 3 silent, the 4th ends it.
+  ASSERT_EQ(CountPhase(all, Phase::Ended), 1);
+
+  feed({PinchAt(0.05f, 2)});
+  EXPECT_EQ(CountFor(all, 2, Phase::Began), 1);
+}
+
+TEST(GestureRecognizer, RejoinSkipsLostTrackWithDifferentKnownHandedness) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);  // Right.
+  r.Process({}, 0, out);
+
+  HandObservation left = PinchAt(0.05f, 2);
+  left.handedness = Handedness::Left;
+  r.Process({left}, 0, out);
+  EXPECT_EQ(CountFor(out, 2, Phase::Began), 1);
+}
+
+TEST(GestureRecognizer, RejoinAdoptsAcrossUnknownHandedness) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);  // Right.
+  r.Process({}, 0, out);
+
+  HandObservation unknown = PinchAt(0.05f, 2);
+  unknown.handedness = Handedness::Unknown;
+  r.Process({unknown}, 0, out);
+  EXPECT_EQ(CountFor(out, 2, Phase::Held), 1);
+  EXPECT_EQ(CountFor(out, 2, Phase::Began), 0);
+}
+
+TEST(GestureRecognizer, AbsentExactlyGraceFramesMaySameIdContinue) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);
+  for (int i = 0; i < 3; ++i) {
+    r.Process({}, 0, out);
+    EXPECT_TRUE(out.empty());
+  }
+  r.Process({PinchAt(0.05f, 1)}, 0, out);
+  EXPECT_EQ(CountFor(out, 1, Phase::Held), 1);
+  EXPECT_EQ(CountPhase(out, Phase::Began), 0);
+  EXPECT_EQ(CountPhase(out, Phase::Ended), 0);
+}
+
+TEST(GestureRecognizer, AbsentExactlyGraceFramesMayBeAdoptedUnderNewId) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);
+  for (int i = 0; i < 3; ++i) r.Process({}, 0, out);
+  r.Process({PinchAt(0.05f, 2)}, 0, out);
+  EXPECT_EQ(CountFor(out, 2, Phase::Held), 1);
+  EXPECT_EQ(CountPhase(out, Phase::Began), 0);
+  EXPECT_EQ(CountPhase(out, Phase::Ended), 0);
+}
+
+TEST(GestureRecognizer, AbsentGracePlusOneEndsAndNewIdBeginsFresh) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  std::vector<GestureEvent> all;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);
+  for (int i = 0; i < 4; ++i) {
+    r.Process({}, 0, out);
+    all.insert(all.end(), out.begin(), out.end());
+  }
+  EXPECT_EQ(CountFor(all, 1, Phase::Ended), 1);
+  r.Process({PinchAt(0.05f, 2)}, 0, out);
+  EXPECT_EQ(CountFor(out, 2, Phase::Began), 1);
+}
+
+TEST(GestureRecognizer, ZeroGraceRestoresImmediateEndedAndNoRejoin) {
+  GestureConfig config = GestureConfig::Default();
+  config.lost_grace_frames = 0;
+  GestureRecognizer r(config);
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1)}, 0, out);
+
+  r.Process({}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Ended);
+
+  r.Process({PinchAt(0.05f, 1)}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Began);
+}
+
+TEST(GestureRecognizer, TrackHoldingNothingIsDroppedAtOnce) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  r.Process({PinchAt(0.90f, 1)}, 0, out);  // Seen, holds nothing.
+  EXPECT_TRUE(out.empty());
+  r.Process({}, 0, out);
+  EXPECT_TRUE(out.empty());
+  // A new nearby id with a gesture must not find anything to adopt.
+  r.Process({PinchAt(0.05f, 2)}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Began);
+}
+
+TEST(GestureRecognizer, PoseRelaxedOnReturnEndsWithZeroDelta) {
+  GestureRecognizer r(GestureConfig::Default());
+  std::vector<GestureEvent> out;
+  for (int i = 0; i < 4; ++i) r.Process({PinchAt(0.05f, 1, {0.5f, 0.8f})}, 0, out);
+  r.Process({}, 0, out);
+  r.Process({PinchAt(0.90f, 1, {0.55f, 0.8f})}, 0, out);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].phase, Phase::Ended);
+  EXPECT_FLOAT_EQ(out[0].delta.x, 0.0f);
 }

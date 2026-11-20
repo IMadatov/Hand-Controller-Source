@@ -21,16 +21,42 @@ void ActionMapper::Reset() {
 ActionMapper::TrackState* ActionMapper::FindOrCreate(
     std::uint32_t track_id) {
   for (TrackState& t : tracks_) {
-    if (t.in_use && t.track_id == track_id) return &t;
+    if (t.in_use && t.track_id == track_id) {
+      t.touched = true;
+      return &t;
+    }
   }
+  TrackState* slot = nullptr;
   for (TrackState& t : tracks_) {
-    if (t.in_use) continue;
-    t.track_id = track_id;
-    t.in_use = true;
-    t.smoothed = Point2{0.0f, 0.0f};
-    return &t;
+    if (!t.in_use) {
+      slot = &t;
+      break;
+    }
   }
-  return nullptr;  // Table full. See Filter.
+  if (slot == nullptr) {
+    // Table full. The vision tracker issues a new id on every re-detection, so
+    // a long session leaves slots held by tracks that are long gone. Reclaim
+    // one whose track did not appear in this Map call; a slot touched in this
+    // call belongs to a live track and is never taken.
+    for (TrackState& t : tracks_) {
+      if (!t.touched) {
+        slot = &t;
+        break;
+      }
+    }
+  }
+  if (slot == nullptr) return nullptr;  // Every slot is live. See Filter.
+  slot->track_id = track_id;
+  slot->in_use = true;
+  slot->touched = true;
+  slot->smoothed = Point2{0.0f, 0.0f};
+  return slot;
+}
+
+void ActionMapper::FreeTrack(std::uint32_t track_id) {
+  for (TrackState& t : tracks_) {
+    if (t.in_use && t.track_id == track_id) t.in_use = false;
+  }
 }
 
 void ActionMapper::ResetTrack(std::uint32_t track_id) {
@@ -76,6 +102,8 @@ void ActionMapper::MapInto(const std::vector<GestureEvent>& events,
                            std::vector<std::uint32_t>* out_origin) {
   out.clear();
   if (out_origin != nullptr) out_origin->clear();
+
+  for (TrackState& t : tracks_) t.touched = false;
 
   for (std::size_t index = 0; index < events.size(); ++index) {
     const GestureEvent& e = events[index];
@@ -123,6 +151,11 @@ void ActionMapper::MapInto(const std::vector<GestureEvent>& events,
         out_origin->push_back(static_cast<std::uint32_t>(index));
       }
     }
+
+    // The track's gesture is over, so its smoothing slot is too. Freed after
+    // its bindings ran, so an Ended-bound motion command still filtered. A
+    // returning track starts from rest anyway (Began resets).
+    if (e.phase == GestureEvent::Phase::Ended) FreeTrack(e.track_id);
   }
 }
 

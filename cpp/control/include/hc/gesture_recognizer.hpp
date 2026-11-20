@@ -58,6 +58,29 @@ struct GestureConfig {
   // human perception, and enough to reject a single bad frame of landmarks.
   int steal_confirm_frames;
 
+  // How many CONSECUTIVE frames a track holding an active gesture may be
+  // absent from `hands` before it is declared gone. Within the window the
+  // track is kept silently (no Held, no Ended); if it is still absent after
+  // it, `Ended` is emitted as for any departure. At least 0; 0 ends a gesture
+  // on the first absent frame.
+  //
+  // Why: the vision tracker has zero miss tolerance, so one missed detection
+  // looks identical to the hand leaving. Ending the gesture on that frame
+  // and beginning it again when the hand returns fires every one-shot binding
+  // (a click) a second time, and the hysteresis cannot help because the
+  // state machine is brand new. A track holding NO gesture is dropped at once.
+  // Absence always ends in an Ended, so a held key is still released.
+  int lost_grace_frames;
+
+  // When a hand appears under a track_id the recognizer has no state for, and
+  // a lost track (absent, still inside its grace window, holding a gesture)
+  // was last seen within this many PALM-SIZES of the new hand's palm centre,
+  // the new id adopts that track's state instead of starting fresh. The
+  // nearest such track wins and a lost track is adopted at most once. This is
+  // for the tracker handing out a new id on re-detection. At least 0; 0
+  // disables rejoining except at the exact same position.
+  float rejoin_max_distance;
+
   // The defaults the application uses. Chosen, not measured -- there is no
   // camera on the build machine, so these are starting points for the
   // owner to tune against a real hand, not findings.
@@ -105,7 +128,9 @@ inline constexpr std::size_t kMaxGestureTracks = 32;
 //
 //   2. State lives per `track_id` and nowhere else. A track that disappears
 //      invalidates only its own state (spec defect 4: shared globals kept
-//      firing for a hand that had left).
+//      firing for a hand that had left). A track holding a gesture survives
+//      up to `lost_grace_frames` absent frames, and may be adopted by a new
+//      id appearing nearby (`rejoin_max_distance`); past the window it ends.
 //
 //   3. `Began` fires once per gesture, not once per frame the pose holds
 //      (spec defect 5: the Python latch reset every frame).
@@ -117,10 +142,17 @@ class GestureRecognizer {
   // resulting events to `out`, which is CLEARED first.
   //
   // `hands` is the complete set of hands seen this frame. A track with state
-  // here but absent from `hands` has left the frame: it emits `Ended` for
-  // whatever it was holding and its state is dropped. An empty `hands` is a
-  // normal frame, not an error (spec defect 2) -- it ends every active
-  // gesture and emits nothing further.
+  // here but absent from `hands` is missing: if it holds nothing its state is
+  // dropped; if it holds a gesture it is kept silently for up to
+  // `lost_grace_frames` frames, then emits `Ended` (latched handedness, last
+  // position, zero delta) and is dropped. An empty `hands` is a normal frame,
+  // not an error (spec defect 2) -- it ends every active gesture once the
+  // grace window has passed, and emits nothing before that.
+  //
+  // On the first frame a missing track is present again (same id, or adopted
+  // by a new id -- see `rejoin_max_distance`) it reports the normal Held or
+  // Ended with a ZERO delta, and events carry the CURRENT observation's
+  // track_id.
   //
   // `out` is a caller-owned buffer so a frame loop can reuse its capacity;
   // this function performs no allocation of its own beyond growing `out`.
@@ -167,10 +199,19 @@ class GestureRecognizer {
     int challenger_frames;
 
     bool seen_this_frame;
+
+    // Consecutive frames this track has been absent while holding a gesture.
+    // Non-zero on the frame it returns marks it as a return.
+    int missing_frames;
   };
 
   TrackState* Find(std::uint32_t track_id);
   TrackState* FindOrCreate(std::uint32_t track_id);
+
+  // Adopts the nearest lost track (see GestureConfig::rejoin_max_distance)
+  // under `new_id`, or returns nullptr when there is none.
+  TrackState* Rejoin(std::uint32_t new_id, Handedness handedness,
+                    const HandFeatures& f);
 
   GestureConfig config_;
 

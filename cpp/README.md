@@ -272,7 +272,9 @@ left  thumb_up    ended -> key_release arrow_right
   `thumb_up`, `pinky_only`, `four_fingers`. Each names the **pose**, never the
   action, because any pose can be bound to anything.
 - **phase** — `began` fires once, `held` fires every frame, `ended` fires on
-  release.
+  release. An `ended` caused by losing the hand is delayed by a few frames
+  (`lost_grace_frames`, default 3) so a one-frame tracking dropout does not end
+  and re-fire a gesture.
 - **command** — `move_cursor`, `scroll`, `click`, `double_click`, `key_press`,
   `key_release`. `click`/`double_click` take an optional button (default
   `left`); the key commands require a key name; `move_cursor`/`scroll` take no

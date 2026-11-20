@@ -283,6 +283,9 @@ void DumpRecognizer() {
                   .c_str());
   std::printf("    \"pinch_span\": %s,\n", Num(c.pinch_span).c_str());
   std::printf("    \"steal_confirm_frames\": %d,\n", c.steal_confirm_frames);
+  std::printf("    \"lost_grace_frames\": %d,\n", c.lost_grace_frames);
+  std::printf("    \"rejoin_max_distance\": %s,\n",
+              Num(c.rejoin_max_distance).c_str());
   std::printf("    \"steal_note\": %s,\n",
               Str("Five pairs differ by one finger -- fist/point_index, "
                   "fist/thumb_up, fist/pinky_only, open_palm/four_fingers, "
@@ -482,6 +485,8 @@ void DumpSampleSession(const hc::BindingSet& config) {
 
     // Left hand: thumb-up for frames 4..9, absent otherwise, so the sample
     // contains a hand appearing and leaving as well as a press and release.
+    // The release (`ended`) arrives lost_grace_frames after the last frame
+    // the hand is present, not on the first frame it is missing.
     if (frame >= 4 && frame <= 9) {
       hands.push_back(ThumbUp(2, hc::Handedness::Left, {0.20f, 0.80f}));
     }

@@ -71,8 +71,10 @@ enum GesturePhase {
   /// every frame.
   held('held', 'while held'),
 
-  /// Stopped — either the pose relaxed or the hand left the frame. A binding
-  /// holding a key or a button releases here.
+  /// Stopped — either the pose relaxed or the hand left the frame. A hand loss
+  /// is reported only after `lost_grace_frames` (default 3) missing frames; a
+  /// hand returning within that window continues with no new `began`. A
+  /// binding holding a key or a button releases here.
   ended('ended', 'on release');
 
   const GesturePhase(this.wire, this.label);
@@ -138,11 +140,14 @@ class GestureEvent {
   final GesturePhase phase;
 
   /// Palm centre, frame-normalized `0..1`. On an [GesturePhase.ended] caused
-  /// by the hand leaving the frame this is the last position observed.
+  /// by the hand leaving the frame this is the last position observed. The
+  /// first event after a grace-window gap carries the current observation's
+  /// position.
   final ({double x, double y}) position;
 
   /// Movement since the previous frame this track was seen. Zero on
-  /// [GesturePhase.began], and zero on an `ended` caused by hand loss.
+  /// [GesturePhase.began], zero on an `ended` caused by hand loss, and zero on
+  /// the first event after a grace-window gap (the hand returned in time).
   final ({double x, double y}) delta;
 
   final int timestampUs;

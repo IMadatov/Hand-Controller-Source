@@ -532,3 +532,116 @@ TEST(Controller, CommandOriginsAreEmptyWhenNothingMatched) {
   controller.PollCommandOrigins(origins);
   EXPECT_TRUE(origins.empty());
 }
+
+// --- one physical gesture must not fire twice across a tracking dropout -----
+
+namespace {
+
+using Frame = std::vector<HandObservation>;
+
+void AddFrames(std::vector<Frame>& script, int count,
+               const HandObservation& hand) {
+  for (int i = 0; i < count; ++i) script.push_back({hand});
+}
+
+// Runs the script to its end and returns what the sink heard.
+std::vector<Command> RunScript(std::vector<Frame> script) {
+  auto sink = std::make_unique<LoggingSink>();
+  const LoggingSink* recorded = sink.get();
+  const int frames = static_cast<int>(script.size());
+  Controller controller(Frames(frames),
+                        std::make_unique<ScriptedTracker>(std::move(script)),
+                        std::move(sink), ShippedConfig());
+  EXPECT_TRUE(controller.Start());
+  RunToEnd(controller);
+  std::vector<Command> heard = recorded->Commands();  // Before Stop().
+  controller.Stop();
+  return heard;
+}
+
+int Clicks(const std::vector<Command>& c) {
+  return CountKind(c, Command::Kind::Click);
+}
+
+}  // namespace
+
+TEST(Controller, DropoutAndNewTrackIdDoesNotRefireClick) {
+  std::vector<Frame> script;
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  script.push_back({});  // One frame of presence dropout.
+  AddFrames(script, 5,
+            hc_test::TwoFingers(2, Handedness::Right, {0.5f, 0.8f}));
+  EXPECT_EQ(Clicks(RunScript(script)), 1);
+}
+
+TEST(Controller, DropoutWithSameTrackIdDoesNotRefireClick) {
+  std::vector<Frame> script;
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  script.push_back({});
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  EXPECT_EQ(Clicks(RunScript(script)), 1);
+}
+
+// Guard: a fix must not suppress genuine repeats.
+TEST(Controller, ClickAfterLongAbsenceFiresAgain) {
+  std::vector<Frame> script;
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  for (int i = 0; i < 15; ++i) script.push_back({});
+  AddFrames(script, 5,
+            hc_test::TwoFingers(2, Handedness::Right, {0.5f, 0.8f}));
+  EXPECT_EQ(Clicks(RunScript(script)), 2);
+}
+
+// Guard: pose released (hand still visible), then made again.
+TEST(Controller, ClickAfterPoseReleasedFiresAgain) {
+  std::vector<Frame> script;
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  AddFrames(script, 12, hc_test::OpenPalm(1, Handedness::Right, {0.5f, 0.8f}));
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.5f, 0.8f}));
+  EXPECT_EQ(Clicks(RunScript(script)), 2);
+}
+
+// Guard: a hand reappearing far away after a one-frame gap is a different
+// gesture (more than two palm-sizes, ~0.6 of the frame here).
+TEST(Controller, ClickReappearingFarAwayFiresAgain) {
+  std::vector<Frame> script;
+  AddFrames(script, 5,
+            hc_test::TwoFingers(1, Handedness::Right, {0.2f, 0.8f}));
+  script.push_back({});
+  AddFrames(script, 5,
+            hc_test::TwoFingers(2, Handedness::Right, {0.9f, 0.8f}));
+  EXPECT_EQ(Clicks(RunScript(script)), 2);
+}
+
+// Safety guard: a key pressed by a gesture is released when the hand leaves.
+TEST(Controller, KeyReleasedWithinFiveFramesOfHandLeaving) {
+  auto sink = std::make_unique<LoggingSink>();
+  const LoggingSink* recorded = sink.get();
+
+  std::vector<Frame> script;
+  AddFrames(script, 4, hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f}));
+  for (int i = 0; i < 10; ++i) script.push_back({});
+
+  Controller controller(Frames(14),
+                        std::make_unique<ScriptedTracker>(script),
+                        std::move(sink), ShippedConfig());
+  ASSERT_TRUE(controller.Start());
+  for (int i = 0; i < 4; ++i) ASSERT_TRUE(controller.Step());
+  ASSERT_EQ(CountKind(recorded->Commands(), Command::Kind::KeyPress), 1);
+  ASSERT_EQ(recorded->Commands().back().key, hc::Key::ArrowRight);
+
+  bool released = false;
+  for (int i = 0; i < 5 && !released; ++i) {
+    ASSERT_TRUE(controller.Step());
+    released = CountKind(recorded->Commands(), Command::Kind::KeyRelease) == 1;
+  }
+  EXPECT_TRUE(released) << "no key_release within 5 frames of the hand leaving"
+                           ", before Stop()";
+  controller.Stop();
+}
