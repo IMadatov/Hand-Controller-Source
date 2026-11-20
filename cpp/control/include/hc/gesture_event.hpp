@@ -68,7 +68,8 @@ bool GestureKindFromName(const char* name, GestureKind& out);
 //          scroll) acts here, every frame.
 //   Ended  the gesture stopped, either because the pose relaxed or because
 //          the hand left the frame. A binding holding a key or a mouse
-//          button releases here.
+//          button releases here. An Ended caused by the hand leaving arrives
+//          lost_grace_frames (default 3) frames after the hand was last seen.
 //
 // A design emitting only a level cannot express the one-shot latch or the
 // release, which are spec defects 5 and 7 respectively.
@@ -98,6 +99,11 @@ struct GestureEvent {
   // Movement of `position` since the previous frame in which this track was
   // seen. Zero on `Began`, and zero on an `Ended` caused by the hand leaving
   // the frame.
+  //
+  // A hand that returns (same id) or is adopted under a new id within the
+  // grace window continues its gesture with no new Began; its first event
+  // after the gap has zero delta and carries the current observation's
+  // track_id.
   //
   // Relative rather than absolute on purpose: the mapper multiplies this by a
   // sensitivity factor, which is what lets a small hand movement cross a wide

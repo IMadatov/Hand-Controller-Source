@@ -76,6 +76,7 @@ class ActionMapper {
     std::uint32_t track_id;
     bool in_use;
     Point2 smoothed;  // Last smoothed motion for this track.
+    bool touched;     // Used during the current Map call; not evictable.
   };
 
   // The one implementation behind both Map overloads. `out_origin` is null
@@ -85,6 +86,7 @@ class ActionMapper {
                std::vector<std::uint32_t>* out_origin);
 
   TrackState* FindOrCreate(std::uint32_t track_id);
+  void FreeTrack(std::uint32_t track_id);
   void ResetTrack(std::uint32_t track_id);
 
   // Applies sensitivity and exponential smoothing to one frame of motion.

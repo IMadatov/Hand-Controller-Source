@@ -74,7 +74,9 @@ chunki har qanday poza har qanday komandaga bog'lanishi mumkin.
 **Phase**: `began` | `held` | `ended`
 - `began` — bir martalik (click, screenshot)
 - `held` — har kadrda (kursor, scroll)
-- `ended` — qo'yib yuborish (key_release)
+- `ended` — qo'yib yuborish (key_release). Qo'l yo'qolishi sabab bo'lgan
+  `ended` bir necha kadrga kechiktiriladi (`lost_grace_frames`, default 3),
+  shunda bir kadrlik treking uzilishi jestni tugatib qayta ishga tushirmaydi.
 
 **Command** (`CommandKindName`, `cpp/control/include/hc/command.hpp`):
 `none`, `move_cursor`, `click`, `double_click`, `scroll`, `key_press`,

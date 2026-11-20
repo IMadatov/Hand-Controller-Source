@@ -433,3 +433,142 @@ TEST(ActionMapper, HandlesMoreTracksThanTheSmoothingTable) {
   m.Map(events, out);
   EXPECT_EQ(out.size(), events.size());
 }
+
+// --- smoothing state must survive track-id churn ---------------------------
+//
+// Every hand dropout re-issues a track id, and the smoothing table never frees
+// a slot. These reproduce the cursor going unfiltered once 32 ids have been
+// seen in a session.
+
+namespace {
+
+const char* kSmoothedCursor =
+    "set sensitivity 2\n"
+    "set smoothing 0.5\n"
+    "right point_index held -> move_cursor\n";
+
+// Feeds Began plus alternating-noise Held events on one track and returns the
+// cursor x deltas the mapper produced.
+std::vector<float> NoisyCursorRun(ActionMapper& m, std::uint32_t track_id,
+                                  int held_frames) {
+  std::vector<Command> ignored;
+  m.Map({Event(GestureKind::PointIndex, Phase::Began, Handedness::Right,
+               {0.0f, 0.0f}, track_id)},
+        ignored);
+
+  std::vector<float> xs;
+  for (int i = 0; i < held_frames; ++i) {
+    const float dx = (i % 2 == 0) ? 0.01f : -0.01f;
+    const std::vector<Command> out =
+        MapOne(m, Event(GestureKind::PointIndex, Phase::Held,
+                        Handedness::Right, {dx, 0.0f}, track_id));
+    if (out.size() == 1 && out[0].kind == Command::Kind::MoveCursorRelative) {
+      xs.push_back(out[0].delta.x);
+    }
+  }
+  return xs;
+}
+
+void ExpectEmaAndBoundedJump(const std::vector<float>& xs, int held_frames) {
+  ASSERT_EQ(xs.size(), static_cast<std::size_t>(held_frames));
+  float smoothed = 0.0f;
+  float max_jump = 0.0f;
+  for (int i = 0; i < held_frames; ++i) {
+    const float raw = (i % 2 == 0) ? 0.01f : -0.01f;
+    smoothed = 0.5f * smoothed + 0.5f * raw;
+    EXPECT_NEAR(xs[i], smoothed * 2.0f, 1e-6f) << "frame " << i;
+    if (i > 0) max_jump = std::fmax(max_jump, std::fabs(xs[i] - xs[i - 1]));
+  }
+  // Unfiltered, the alternating input jumps 0.04 per frame. The EMA settles
+  // to roughly 0.0133 swings, so anything near 0.04 means no filtering.
+  EXPECT_LT(max_jump, 0.025f) << "frame-to-frame jump is unfiltered-sized";
+}
+
+}  // namespace
+
+TEST(ActionMapper, FreshTrackIsSmoothed) {
+  ActionMapper m(Config(kSmoothedCursor));
+  ExpectEmaAndBoundedJump(NoisyCursorRun(m, 1, 8), 8);
+}
+
+TEST(ActionMapper, SmoothingSurvivesManyTrackIds) {
+  ActionMapper m(Config(kSmoothedCursor));
+
+  // 32 short-lived tracks, as 32 hand dropouts would produce.
+  for (std::uint32_t id = 1; id <= hc::kMaxGestureTracks; ++id) {
+    std::vector<Command> out;
+    m.Map({Event(GestureKind::PointIndex, Phase::Began, Handedness::Right,
+                 {0.0f, 0.0f}, id)},
+          out);
+    m.Map({Event(GestureKind::PointIndex, Phase::Held, Handedness::Right,
+                 {0.01f, 0.0f}, id)},
+          out);
+    m.Map({Event(GestureKind::PointIndex, Phase::Ended, Handedness::Right,
+                 {0.0f, 0.0f}, id)},
+          out);
+  }
+
+  const std::uint32_t next =
+      static_cast<std::uint32_t>(hc::kMaxGestureTracks) + 1;
+  ExpectEmaAndBoundedJump(NoisyCursorRun(m, next, 8), 8);
+}
+
+TEST(ActionMapper, EndedFreesTheSmoothingSlot) {
+  ActionMapper m(Config(kSmoothedCursor));
+  std::vector<Command> out;
+  const auto held = [&] {
+    return MapOne(m, Event(GestureKind::PointIndex, Phase::Held,
+                           Handedness::Right, {0.01f, 0.0f}, 1));
+  };
+
+  // Converge the filter towards 0.01 (output towards 0.02).
+  std::vector<Command> last;
+  for (int i = 0; i < 8; ++i) last = held();
+  ASSERT_EQ(last.size(), 1u);
+  EXPECT_GT(last[0].delta.x, 0.019f);
+
+  m.Map({Event(GestureKind::PointIndex, Phase::Ended, Handedness::Right,
+               {0.0f, 0.0f}, 1)},
+        out);
+
+  // Same id, no Began in between: only a freed slot starts from rest again.
+  // First filtered sample is 0.5 * 0.01, times sensitivity 2.
+  const std::vector<Command> after = held();
+  ASSERT_EQ(after.size(), 1u);
+  EXPECT_NEAR(after[0].delta.x, 0.01f, 1e-6f);
+}
+
+TEST(ActionMapper, FullTableEvictsASlotNotTouchedInThisCall) {
+  ActionMapper m(Config(kSmoothedCursor));
+  std::vector<Command> out;
+
+  // Fill every slot with a track that never ends.
+  for (std::uint32_t id = 1; id <= hc::kMaxGestureTracks; ++id) {
+    m.Map({Event(GestureKind::PointIndex, Phase::Held, Handedness::Right,
+                 {0.01f, 0.0f}, id)},
+          out);
+  }
+
+  // A new id, in a call that touches none of the old ones, must be filtered.
+  ExpectEmaAndBoundedJump(NoisyCursorRun(m, 1000, 8), 8);
+}
+
+TEST(ActionMapper, FullTableNeverEvictsASlotTouchedInThisCall) {
+  ActionMapper m(Config(kSmoothedCursor));
+  std::vector<Command> out;
+
+  // One call touching every slot plus one more: the extra has nowhere to go
+  // and degrades to unfiltered (raw * sensitivity), while the rest stay
+  // smoothed.
+  std::vector<GestureEvent> events;
+  for (std::uint32_t id = 1; id <= hc::kMaxGestureTracks + 1; ++id) {
+    events.push_back(Event(GestureKind::PointIndex, Phase::Held,
+                           Handedness::Right, {0.01f, 0.0f}, id));
+  }
+  m.Map(events, out);
+  ASSERT_EQ(out.size(), events.size());
+  for (std::size_t i = 0; i < hc::kMaxGestureTracks; ++i) {
+    EXPECT_NEAR(out[i].delta.x, 0.01f, 1e-6f);
+  }
+  EXPECT_NEAR(out.back().delta.x, 0.02f, 1e-6f);
+}

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <string>
@@ -90,6 +91,18 @@ GestureConfig GestureConfig::Default() {
   // field's comment for why a takeover exists at all.
   c.steal_confirm_frames = 2;
 
+  // Three frames is roughly 30 ms at the measured frame rate. Chosen, not
+  // measured: long enough to bridge the one- or two-frame dropouts a detector
+  // with zero miss tolerance produces, short enough that a hand that really
+  // left releases its key before a user could notice. See the field's comment.
+  c.lost_grace_frames = 3;
+
+  // One palm-size between where the track was last seen and where the new hand
+  // appeared. Chosen, not measured: a hand moves a fraction of a palm-size per
+  // frame, so a few frames of gap stays well inside it, while a different hand
+  // elsewhere in the frame is typically several palm-sizes away.
+  c.rejoin_max_distance = 1.0f;
+
   return c;
 }
 
@@ -174,6 +187,16 @@ GestureRecognizer::GestureRecognizer(const GestureConfig& config)
   // behaviour the confirmation window exists to prevent.
   config_.steal_confirm_frames = std::max(1, config_.steal_confirm_frames);
 
+  assert(config_.lost_grace_frames >= 0 &&
+         "GestureConfig: lost_grace_frames must be >= 0");
+  assert(config_.rejoin_max_distance >= 0.0f &&
+         "GestureConfig: rejoin_max_distance must be >= 0");
+  // Floored for the same reason. A negative grace would end gestures on the
+  // frame they went missing, which is the 0 behaviour, so 0 is the safe floor.
+  // `!(x >= 0)` also catches NaN.
+  config_.lost_grace_frames = std::max(0, config_.lost_grace_frames);
+  if (!(config_.rejoin_max_distance >= 0.0f)) config_.rejoin_max_distance = 0.0f;
+
   for (TrackState& t : tracks_) t.in_use = false;
 }
 
@@ -200,6 +223,7 @@ GestureRecognizer::TrackState* GestureRecognizer::FindOrCreate(
     t.challenger = GestureKind::None;
     t.challenger_frames = 0;
     t.seen_this_frame = false;
+    t.missing_frames = 0;
     return &t;
   }
 
@@ -214,20 +238,35 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
                                 std::vector<GestureEvent>& out) {
   out.clear();
 
+  // Pre-pass: mark every track whose id is present, so a rejoin below can only
+  // adopt a track that is genuinely absent this frame -- never one whose own
+  // id appears later in `hands`.
   for (TrackState& t : tracks_) t.seen_this_frame = false;
+  for (const HandObservation& hand : hands) {
+    if (TrackState* t = Find(hand.track_id)) t->seen_this_frame = true;
+  }
 
   for (const HandObservation& hand : hands) {
-    TrackState* state = FindOrCreate(hand.track_id);
+    const HandFeatures f = ComputeFeatures(hand);
+
+    TrackState* state = Find(hand.track_id);
+    if (state == nullptr) state = Rejoin(hand.track_id, hand.handedness, f);
+    if (state == nullptr) state = FindOrCreate(hand.track_id);
     if (state == nullptr) continue;  // At capacity; see FindOrCreate.
     state->seen_this_frame = true;
 
-    const HandFeatures f = ComputeFeatures(hand);
+    // A track that was missing and is now back (same id, or adopted under a
+    // new one) has a gap in its position history. The motion accumulated over
+    // the gap is not the hand's velocity, so it is not reported: the cursor
+    // must not fling when the hand reappears.
+    const bool returning = state->missing_frames > 0;
+    state->missing_frames = 0;
 
     // Movement since this track's previous frame, which is not the same thing
     // as movement since the gesture began -- a hand can be tracked for a
     // while before any gesture latches.
     const Point2 motion =
-        state->has_position
+        (state->has_position && !returning)
             ? Point2{f.palm_center.x - state->last_position.x,
                      f.palm_center.y - state->last_position.y}
             : Point2{0.0f, 0.0f};
@@ -339,9 +378,12 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
     out.push_back(ev);
   }
 
-  // Tracks that were not in `hands` have left the frame. Each releases
-  // whatever it was holding and is dropped -- spec defect 4, where shared
-  // state kept firing for a hand that was no longer there.
+  // Tracks that were not in `hands` are missing. One holding nothing is
+  // dropped at once. One holding a gesture is kept silently for up to
+  // `lost_grace_frames` consecutive frames -- the detector may simply have
+  // missed it -- and once it is still absent after that, it releases what it
+  // held and is dropped. Spec defect 4: shared state kept firing for a hand
+  // that was no longer there; the grace window is bounded so this still holds.
   //
   // Emitted after the present hands' events so that one frame's output is
   // ordered predictably: updates first, then releases.
@@ -349,6 +391,7 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
     if (!t.in_use || t.seen_this_frame) continue;
 
     if (t.active != GestureKind::None) {
+      if (++t.missing_frames <= config_.lost_grace_frames) continue;
       GestureEvent ev{};
       ev.track_id = t.track_id;
       ev.handedness = t.latched_handedness;
@@ -361,6 +404,51 @@ void GestureRecognizer::Process(const std::vector<HandObservation>& hands,
     }
     t.in_use = false;
   }
+}
+
+GestureRecognizer::TrackState* GestureRecognizer::Rejoin(
+    std::uint32_t new_id, Handedness handedness, const HandFeatures& f) {
+  // Known limitation: matching is greedy, per hand, in input order. Two hands
+  // that both drop and return crossed, within one palm-size of each other's
+  // last position, could swap gestures. Identity is the vision layer's job; a
+  // follow-up in hand_tracker_onnx.cpp should persist track ids across short
+  // misses, after which rejoin_max_distance can shrink or go.
+  TrackState* best = nullptr;
+  float best_distance = 0.0f;
+  for (TrackState& t : tracks_) {
+    // Only a track that holds a gesture, is absent this frame, and is still
+    // inside its grace window. missing_frames counts the frames it has been
+    // absent so far, so a hand absent for exactly lost_grace_frames frames may
+    // return under a new id, the same window as a same-id return.
+    if (!t.in_use || t.seen_this_frame) continue;
+    if (t.active == GestureKind::None || !t.has_position) continue;
+    if (t.missing_frames > config_.lost_grace_frames) continue;
+    // Handedness must agree when both sides are known; Unknown matches any.
+    if (handedness != Handedness::Unknown &&
+        t.latched_handedness != Handedness::Unknown &&
+        handedness != t.latched_handedness) {
+      continue;
+    }
+
+    const float dx = f.palm_center.x - t.last_position.x;
+    const float dy = f.palm_center.y - t.last_position.y;
+    const float distance = std::sqrt(dx * dx + dy * dy) / f.palm_size;
+    if (!(distance <= config_.rejoin_max_distance)) continue;
+    if (best == nullptr || distance < best_distance) {
+      best = &t;
+      best_distance = distance;
+    }
+  }
+  if (best == nullptr) return nullptr;
+
+  // Re-key. The adopted state is now present under the new id, so it cannot
+  // be adopted a second time.
+  best->track_id = new_id;
+  best->seen_this_frame = true;
+  // Make sure the caller sees it as returning even if it had not yet counted a
+  // miss (it goes missing and comes back inside the same frame).
+  if (best->missing_frames == 0) best->missing_frames = 1;
+  return best;
 }
 
 void GestureRecognizer::InvalidateTrack(std::uint32_t track_id) {
