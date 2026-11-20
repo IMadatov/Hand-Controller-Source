@@ -415,8 +415,11 @@ TEST(Controller, PausingTwiceReleasesOnlyOnce) {
 // drop the tracker, the ROI and every gesture latch -- the user's hand would
 // visibly flicker for having ticked a checkbox.
 TEST(Controller, SetSinkSwapsWhereCommandsGoWithoutRestarting) {
-  auto first = std::make_unique<LoggingSink>();
-  const LoggingSink* one = first.get();
+  // Test-owned log: SetSink destroys the outgoing sink, and `one` is read
+  // afterwards, so the recording must outlive the BorrowedSink handed over.
+  LoggingSink log_one;
+  const LoggingSink* one = &log_one;
+  auto first = std::make_unique<BorrowedSink>(&log_one);
 
   Controller controller(Frames(12),
                         std::make_unique<ScriptedTracker>(PointingDrift(12)),
@@ -450,8 +453,11 @@ TEST(Controller, SetSinkSwapsWhereCommandsGoWithoutRestarting) {
 // moment later it does not exist. Switching injection off mid-gesture is
 // exactly when a key gets stranded.
 TEST(Controller, SetSinkReleasesTheOutgoingSinksHeldKeys) {
-  auto first = std::make_unique<LoggingSink>();
-  const LoggingSink* one = first.get();
+  // Test-owned log: the outgoing sink is destroyed inside SetSink and `one`
+  // is read afterwards.
+  LoggingSink log_one;
+  const LoggingSink* one = &log_one;
+  auto first = std::make_unique<BorrowedSink>(&log_one);
 
   std::vector<std::vector<HandObservation>> script;
   script.push_back({hc_test::ThumbUp(2, Handedness::Left, {0.2f, 0.8f})});
