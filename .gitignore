@@ -6,5 +6,8 @@ build
 build-asan
 cpp/build*/
 Design
-.claude
+# Local Claude Code state stays private; the shared agent team is tracked.
+.claude/*
+!.claude/agents/
+!.claude/settings.json
 .vscode
